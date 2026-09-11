@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "scrcpy-sms": {
+      "command": "node",
+      "args": [
+        "C:\\Users\\SH10\\Documents\\Codex\\2026-09-10\\create-an-image-of\\outputs\\android-agent-source\\ws-scrcpy\\scrcpy-sms-agent\\src\\mcp-server.js"
+      ],
+      "env": {
+        "ADB": "C:\\Users\\SH10\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe"
+      }
+    }
+  }
+}

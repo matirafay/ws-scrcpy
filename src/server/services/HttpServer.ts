@@ -127,6 +127,15 @@ export class HttpServer extends TypedEmitter<HttpServerEvents> implements Servic
                 server = http.createServer(options, currentApp);
             }
             this.servers.push({ server, port });
+            server.on('error', (error: NodeJS.ErrnoException) => {
+                if (error.code === 'EADDRINUSE') {
+                    console.error(
+                        `Port ${port} is already in use (often Docker or another ws-scrcpy). ` +
+                            `For the SMS desktop app run: npm run start:sms`,
+                    );
+                }
+                throw error;
+            });
             server.listen(port, () => {
                 Utils.printListeningMsg(proto, port, PATHNAME);
             });
