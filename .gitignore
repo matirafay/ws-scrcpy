@@ -4,3 +4,10 @@
 /.idea
 /.appium-home
 /logs/
+/_installer_extract/
+/_*.png
+/ftm-*.xml
+/uidump.xml
+/phone-screencap.png
+/scrcpy-after-eye-tap.png
+/scrcpy-window-capture.png
