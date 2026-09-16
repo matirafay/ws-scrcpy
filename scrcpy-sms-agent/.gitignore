@@ -1,5 +1,7 @@
 node_modules/
 vendor/
+dist/
 app.asar.original
 sms-agent-config.json
 *.log
+

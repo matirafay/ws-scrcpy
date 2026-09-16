@@ -25,3 +25,15 @@ scrcpy-sms-agent/
 ## Run
 
 The production build is **Scrcpy SMS Agent** under `%LocalAppData%\Programs`. Leave the scrcpy phone window open; the agent reads that window and posts on its own.
+
+## Build installer
+
+Put Windows `platform-tools` (at least `adb.exe`) in `vendor/platform-tools/`, then:
+
+```shell
+cd scrcpy-sms-agent
+npm install
+npm run dist
+```
+
+The NSIS installer is written to `dist/`. A fresh install already contains `src/lib`, `src/services`, `src/watch`, and `scripts`. Runtime keys stay in `%AppData%`; they are not packaged.
