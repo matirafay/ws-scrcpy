@@ -1,6 +1,6 @@
-const { getLatestFortiToken, listFortiTokenAccounts } = require('./fortitoken');
-const { pushSms } = require('./push');
-const { getConfig } = require('./config');
+const { getLatestFortiToken, listFortiTokenAccounts } = require('../services/fortitoken');
+const { pushSms } = require('../lib/push');
+const { getConfig } = require('../lib/config');
 
 function startFortiTokenRefresh(options = {}) {
     const intervalMs =

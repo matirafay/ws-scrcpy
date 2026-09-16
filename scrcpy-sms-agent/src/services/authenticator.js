@@ -1,5 +1,5 @@
-const { adb, dumpUi, listDevices, parseNodes, shell, withSerial } = require('./adb');
-const { getConfig } = require('./config');
+const { adb, dumpUi, listDevices, parseNodes, shell, withSerial } = require('../lib/adb');
+const { getConfig } = require('../lib/config');
 
 const AUTH_PACKAGE = 'com.google.android.apps.authenticator2';
 const TOTP_PERIOD_SEC = 30;

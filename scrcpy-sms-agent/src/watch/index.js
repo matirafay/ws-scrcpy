@@ -1,9 +1,9 @@
-const { listDevices } = require('./sms');
-const { collectFortiTokenCodes, waitForFreshWindow, totpRemainingSeconds, PREFERRED_LEFT_TO_READ, MIN_LEFT_TO_POST } = require('./fortitoken');
-const { pushSms } = require('./push');
-const { getConfig, configPath } = require('./config');
-const { DEFAULT_TARGETS } = require('./defaults');
-const { ensureScrcpyRunning } = require('./scrcpy');
+const { listDevices } = require('../services/sms');
+const { collectFortiTokenCodes, waitForFreshWindow, totpRemainingSeconds, PREFERRED_LEFT_TO_READ, MIN_LEFT_TO_POST } = require('../services/fortitoken');
+const { pushSms } = require('../lib/push');
+const { getConfig, configPath } = require('../lib/config');
+const { DEFAULT_TARGETS } = require('../lib/defaults');
+const { ensureScrcpyRunning } = require('../services/scrcpy');
 const fs = require('fs');
 const path = require('path');
 

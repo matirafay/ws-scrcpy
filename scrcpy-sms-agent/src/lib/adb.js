@@ -2,6 +2,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { vendorAdb } = require('./paths');
 
 const DEFAULT_ADB = path.join(
     process.env.LOCALAPPDATA || '',
@@ -18,7 +19,7 @@ function bundledAdb() {
         healthAdb,
         process.env.ADB,
         process.resourcesPath ? path.join(process.resourcesPath, 'platform-tools', names) : '',
-        path.join(__dirname, '..', 'vendor', 'platform-tools', names),
+        vendorAdb(names),
         DEFAULT_ADB,
     ].filter(Boolean);
 }

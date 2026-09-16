@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { getLatestSms, listDevices } = require('./sms');
+const { getLatestSms, listDevices } = require('./services/sms');
 
 async function main() {
     const verificationOnly = process.argv.includes('--otp');

@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync, spawn } = require('child_process');
-const { run } = require('./adb');
+const { run } = require('../lib/adb');
+const { scriptFile } = require('../lib/paths');
 
 const CANDIDATES = [
     process.env.SCRCPY,
@@ -45,7 +46,7 @@ function isScrcpyRunning() {
 }
 
 function lockScrcpyWindow() {
-    const script = path.join(__dirname, 'lock-scrcpy-window.ps1');
+    const script = scriptFile('lock-scrcpy-window.ps1');
     if (!fs.existsSync(script)) {
         return '';
     }

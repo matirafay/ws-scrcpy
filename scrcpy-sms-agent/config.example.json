@@ -1,0 +1,34 @@
+{
+  "url": "https://api.example.com/api/ExternalMFACodes/UpdateExternalMFACode",
+  "apiKey": "YOUR_API_KEY",
+  "type": 0,
+  "secretKey": "",
+  "title": "",
+  "description": "",
+  "automationShortCode": "YOUR_SHORTCODE",
+  "authenticatorAccount": "",
+  "fortitokenAccount": "mmehmood",
+  "targets": [
+    {
+      "source": "fortitoken",
+      "account": "tmalik",
+      "aliases": ["tmalik", "CC - tmalik", "CC-tmalik"],
+      "title": "CC - tmalik",
+      "automationShortCode": "CC"
+    },
+    {
+      "source": "fortitoken",
+      "account": "jjilani",
+      "aliases": ["jjilani", "CM - jjilani", "CM-jjilani"],
+      "title": "CM - jjilani",
+      "automationShortCode": "CM"
+    },
+    {
+      "source": "fortitoken",
+      "account": "mmehmood",
+      "aliases": ["mahmood", "mmehmood", "CIS - mmehmood", "CIS-mmehmood", "CIS-mahmood"],
+      "title": "CIS - mmehmood",
+      "automationShortCode": "CIS"
+    }
+  ]
+}

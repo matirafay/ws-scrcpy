@@ -1,10 +1,16 @@
 {
   "name": "scrcpy-sms-agent",
   "version": "1.2.3",
-  "description": "Desktop app and MCP server that reads the latest SMS from a phone mirrored with scrcpy/ADB",
-  "main": "src/desktop-main.js",
+  "description": "Desktop agent that reads FortiToken codes from a scrcpy/ADB phone and posts them to HealthForce.",
+  "main": "src/main.js",
   "bin": {
     "scrcpy-sms-mcp": "src/mcp-server.js"
+  },
+  "scripts": {
+    "start": "electron .",
+    "start:ui": "electron . --ui",
+    "watch": "node src/watch/index.js",
+    "cli": "node src/cli.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.4",

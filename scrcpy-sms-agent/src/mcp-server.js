@@ -2,10 +2,10 @@
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { z } = require('zod');
-const { getLatestSms, listDevices, openSmsApp, readSmsUi } = require('./sms');
-const { getLatestRingCentral, openRingCentral } = require('./ringcentral');
-const { getLatestAuthenticator, openAuthenticator } = require('./authenticator');
-const { startScrcpy } = require('./scrcpy');
+const { getLatestSms, listDevices, openSmsApp, readSmsUi } = require('./services/sms');
+const { getLatestRingCentral, openRingCentral } = require('./services/ringcentral');
+const { getLatestAuthenticator, openAuthenticator } = require('./services/authenticator');
+const { startScrcpy } = require('./services/scrcpy');
 
 function asText(data) {
     return {
@@ -120,7 +120,7 @@ async function main() {
         },
         async ({ serial, verificationOnly, lastDay, url, apiKey, token, automationShortCode, type, secretKey }) => {
             try {
-                const { pushSms } = require('./push');
+                const { pushSms } = require('./lib/push');
                 const sms = await getLatestSms({ serial, verificationOnly: verificationOnly !== false, lastDay });
                 const pushed = await pushSms(sms, { url, apiKey: apiKey || token, automationShortCode, type, secretKey });
                 return asText({ sms: { from: sms.from, time: sms.time, code: sms.code, count: sms.conversations.length }, pushed });

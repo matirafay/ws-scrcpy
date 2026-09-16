@@ -1,4 +1,4 @@
-const { adb, dumpUi, listDevices, parseNodes, shell, withSerial } = require('./adb');
+const { adb, dumpUi, listDevices, parseNodes, shell, withSerial } = require('../lib/adb');
 const { extractCode, filterToday, pickMessage } = require('./sms');
 
 const RC_PACKAGE = 'com.glip.mobile';

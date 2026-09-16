@@ -2,6 +2,8 @@
 
 Web client for [Genymobile/scrcpy][scrcpy] and more.
 
+The HealthForce FortiToken desktop agent is a separate app in [`scrcpy-sms-agent/`](./scrcpy-sms-agent).
+
 ## Requirements
 
 Browser must support the following technologies:

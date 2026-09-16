@@ -2,8 +2,9 @@
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { adb, dumpUi, listDevices, parseNodes, screencapPng, shell, withSerial } = require('./adb');
-const { getConfig } = require('./config');
+const { adb, dumpUi, listDevices, parseNodes, screencapPng, shell, withSerial } = require('../lib/adb');
+const { getConfig } = require('../lib/config');
+const { scriptFile } = require('../lib/paths');
 
 const FTM_PACKAGE = 'com.fortinet.android.ftm';
 const TOTP_PERIOD_SEC = 30;
@@ -560,7 +561,7 @@ function cropBounds(match) {
 }
 
 function runOcrScript(imagePath, accountHint, extraArgs) {
-    const script = path.join(__dirname, 'ocr-code.ps1');
+    const script = scriptFile('ocr-code.ps1');
     return new Promise((resolve) => {
         const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-ImagePath', imagePath];
         if (accountHint) {
@@ -600,7 +601,7 @@ function runOcrScript(imagePath, accountHint, extraArgs) {
 }
 
 async function captureScrcpyWindowPng(destPath) {
-    const script = path.join(__dirname, 'capture-scrcpy.ps1');
+    const script = scriptFile('capture-scrcpy.ps1');
     await new Promise((resolve, reject) => {
         const child = spawn(
             'powershell.exe',

@@ -1,9 +1,10 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { getLatestSms, listDevices } = require('./sms');
-const { startScrcpy } = require('./scrcpy');
+const { getLatestSms, listDevices } = require('./services/sms');
+const { startScrcpy } = require('./services/scrcpy');
 const { startWatch } = require('./watch');
+const { configExample, appRoot } = require('./lib/paths');
 
 const showUi = process.argv.includes('--ui');
 
@@ -13,10 +14,14 @@ function packagedAdb() {
 
 function seedConfig(userData) {
     const dest = path.join(userData, 'sms-agent-config.json');
-    const bundled = path.join(process.resourcesPath, 'sms-agent-config.json');
-    const local = path.join(__dirname, '..', 'sms-agent-config.json');
-    const source = fs.existsSync(bundled) ? bundled : local;
-    if (!fs.existsSync(source)) {
+    const candidates = [
+        path.join(appRoot(), 'sms-agent-config.json'),
+        process.resourcesPath ? path.join(process.resourcesPath, 'sms-agent-config.json') : '',
+        configExample(),
+        process.resourcesPath ? path.join(process.resourcesPath, 'config.example.json') : '',
+    ];
+    const source = candidates.find((item) => item && fs.existsSync(item));
+    if (!source) {
         return dest;
     }
     const incoming = JSON.parse(fs.readFileSync(source, 'utf8'));
@@ -71,8 +76,8 @@ function createWindow() {
 }
 
 function registerIpc() {
-    const { getConfig, saveConfig } = require('./config');
-    const { pushSms } = require('./push');
+    const { getConfig, saveConfig } = require('./lib/config');
+    const { pushSms } = require('./lib/push');
     ipcMain.handle('list-devices', () => listDevices());
     ipcMain.handle('get-latest-sms', (_event, options) => getLatestSms(options || {}));
     ipcMain.handle('start-scrcpy', (_event, serial) => startScrcpy(serial));
