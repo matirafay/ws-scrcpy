@@ -1,0 +1,13 @@
+{
+  "name": "scrcpy-sms-agent",
+  "version": "1.2.3",
+  "description": "Desktop app and MCP server that reads the latest SMS from a phone mirrored with scrcpy/ADB",
+  "main": "src/desktop-main.js",
+  "bin": {
+    "scrcpy-sms-mcp": "src/mcp-server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.4",
+    "zod": "^3.24.2"
+  }
+}

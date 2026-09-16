@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <title>Scrcpy SMS Agent</title>
+    <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+    <main>
+        <h1>Scrcpy SMS Agent</h1>
+        <p class="sub">Reads SMS from today on your USB-connected phone (works with scrcpy mirroring).</p>
+        <p id="status" class="status">Checking device…</p>
+        <div class="row">
+            <button id="refresh">Refresh device</button>
+            <button id="scrcpy">Open scrcpy</button>
+            <button id="sms" class="primary">Read today</button>
+        </div>
+        <label class="check">
+            <input id="otp" type="checkbox" checked /> Prefer verification / OTP messages
+        </label>
+        <label class="field">
+            Endpoint
+            <input id="endpoint" type="url" placeholder="https://apistaging.healthforcehub.link/api/ExternalMFACodes/UpdateExternalMFACode" />
+        </label>
+        <label class="field">
+            x-api-key
+            <input id="token" type="password" autocomplete="off" />
+        </label>
+        <label class="field">
+            automationShortCode
+            <input id="shortcode" type="text" placeholder="YOUR_SHORTCODE" />
+        </label>
+        <label class="field">
+            type (0 = TOTP, 1 = SMS)
+            <input id="mfa-type" type="number" value="0" />
+        </label>
+        <label class="field">
+            secretKey (TOTP seed, optional for SMS)
+            <input id="secret-key" type="password" autocomplete="off" />
+        </label>
+        <label class="check">
+            <input id="auto-push" type="checkbox" checked /> Push after reading
+        </label>
+        <label class="check">
+            <input id="auto-watch" type="checkbox" checked /> Auto pick OTP and transmit
+        </label>
+        <label class="field">
+            Check every (seconds)
+            <input id="interval" type="number" min="10" value="15" />
+        </label>
+        <div class="row">
+            <button id="push">Push to endpoint</button>
+        </div>
+        <p id="push-status" class="status"></p>
+        <section id="result" hidden>
+            <h2>Selected</h2>
+            <dl>
+                <div><dt>From</dt><dd id="from"></dd></div>
+                <div><dt>Time</dt><dd id="time"></dd></div>
+                <div><dt>Code</dt><dd id="code"></dd></div>
+            </dl>
+            <pre id="body"></pre>
+            <h2 id="list-title">Today</h2>
+            <div id="list" class="list"></div>
+        </section>
+        <p id="error" class="error" hidden></p>
+    </main>
+    <script src="app.js"></script>
+</body>
+</html>
