@@ -84,7 +84,23 @@ async function pushNewCode(sms, state, log, target) {
     state.lastSent[key] = sms.code;
     state.lastSentCode = sms.code;
     saveState(state);
-    log('Posted "' + target.title + '" with ' + left + 's left (HTTP ' + result.inbox.status + '). Copy it now.');
+    const reply = String((result.inbox && result.inbox.body) || '')
+        .replace(/\d/g, '#')
+        .slice(0, 180);
+    log(
+        'Posted "' +
+            target.title +
+            '" with ' +
+            left +
+            's left (HTTP ' +
+            result.inbox.status +
+            ' type=' +
+            (result.payload && result.payload.type) +
+            ' short=' +
+            (result.payload && result.payload.automationShortCode) +
+            (reply ? ' reply=' + reply : '') +
+            '). Copy it now.',
+    );
     return true;
 }
 
@@ -206,7 +222,7 @@ function startWatch(options = {}) {
 
     log('Posting to ' + getConfig().url);
     log('Config ' + configPath());
-    log('FortiToken: OCR visible codes first; tap eye only if OCR sees no digits.');
+    log('FortiToken: OCR visible codes first; tap eye only for dashed/hidden rows, once per window.');
     log('Post at the start of each 30s window (target ' + PREFERRED_LEFT_TO_READ + 's+ remaining).');
     run();
     return () => {

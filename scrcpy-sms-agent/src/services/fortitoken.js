@@ -600,12 +600,14 @@ function runOcrScript(imagePath, accountHint, extraArgs) {
     });
 }
 
-async function captureScrcpyWindowPng(destPath) {
+async function captureScrcpyWindowPng(destPath, extraArgs = []) {
     const script = scriptFile('capture-scrcpy.ps1');
     await new Promise((resolve, reject) => {
         const child = spawn(
             'powershell.exe',
-            ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-OutPath', destPath],
+            ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-OutPath', destPath].concat(
+                extraArgs || [],
+            ),
             { windowsHide: true },
         );
         let stderr = '';
@@ -681,7 +683,10 @@ function cachedEyeFor(hint, from) {
 function syntheticAccountMatch(names) {
     const list = Array.isArray(names) ? names : names ? [names] : [];
     const from =
-        list.find((n) => /[\s-]/.test(String(n)) || String(n).length > 6) || list[0] || '';
+        list.find((n) => /^(cc|cm|cis)\b/i.test(String(n).trim())) ||
+        list.find((n) => /[\s-]/.test(String(n))) ||
+        list[0] ||
+        '';
     const hint = bestOcrHint({ from }, list);
     return {
         from,
@@ -689,7 +694,7 @@ function syntheticAccountMatch(names) {
         time: 'now',
         source: 'fortitoken',
         code: null,
-        hidden: true,
+        hidden: null,
         tap: null,
         eye: cachedEyeFor(hint, from),
     };
@@ -758,13 +763,12 @@ function dropDuplicateOcrCodes(pending, logFn) {
     });
 }
 
-function rowNeedsEye(item, totpOnScreen, hiddenPrefixes) {
+function rowNeedsEye(item, _totpOnScreen, hiddenPrefixes) {
     if (!item || item.match.code) {
         return false;
     }
-    if (totpOnScreen === 0) {
-        return true;
-    }
+    // Accessibility almost always reports "hidden" on this FortiToken build, even
+    // when digits are on screen. Only OCR dashed-rows are a safe eye-tap signal.
     const prefix = hintPrefix(item.hint) || hintPrefix(item.match && item.match.from);
     return Boolean(prefix && hiddenPrefixes && hiddenPrefixes.includes(prefix));
 }
@@ -774,8 +778,14 @@ function emptyOcrAnalysis() {
 }
 
 function parseOcrAnalysis(raw) {
+    const text = String(raw || '')
+        .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, ' ')
+        .trim();
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    const json = start >= 0 && end > start ? text.slice(start, end + 1) : text;
     try {
-        const parsed = JSON.parse(String(raw || '').trim() || '{}');
+        const parsed = JSON.parse(json || '{}');
         const codes = parsed.codes || {};
         const hidden = Array.isArray(parsed.hidden)
             ? parsed.hidden.map((item) => String(item || '').toLowerCase().trim()).filter(Boolean)
@@ -792,10 +802,26 @@ function parseOcrAnalysis(raw) {
                 cc: normalizeTotp(codes.cc) || null,
             },
             hidden,
-            dump: String(parsed.dump || ''),
+            dump: String(parsed.dump || '') || (text && start < 0 ? 'NON_JSON ' + text.slice(0, 120) : ''),
         };
     } catch (_err) {
-        return emptyOcrAnalysis();
+        const fallback = emptyOcrAnalysis();
+        fallback.dump = 'PARSE_FAIL ' + text.slice(0, 160);
+        const loose = text.match(/"codes"\s*:\s*\{[^}]*\}/);
+        if (loose) {
+            try {
+                const codes = JSON.parse('{' + loose[0] + '}').codes || {};
+                fallback.codes = {
+                    cm: normalizeTotp(codes.cm) || null,
+                    cis: normalizeTotp(codes.cis) || null,
+                    cc: normalizeTotp(codes.cc) || null,
+                };
+                fallback.totp = [fallback.codes.cm, fallback.codes.cis, fallback.codes.cc].filter(Boolean).length;
+            } catch (_inner) {
+                // keep empty codes
+            }
+        }
+        return fallback;
     }
 }
 
@@ -893,14 +919,18 @@ async function tapAndCapture(serial, account, logFn, opts = {}) {
     const log = typeof logFn === 'function' ? logFn : () => {};
     const allowEye = opts.allowEye !== false;
     const reused = typeof account === 'object' && account && (account.tap || account.eye || account.code);
-    const names = reused ? [account.from] : Array.isArray(account) ? account : [account];
+    const names = reused
+        ? [account.from].concat(Array.isArray(opts.aliases) ? opts.aliases : []).filter(Boolean)
+        : Array.isArray(account)
+          ? account
+          : [account];
     const match = reused ? account : await findRowOnList(serial, account);
     if (!match) {
         log('FortiToken debug: tapAndCapture no row for ' + JSON.stringify(names));
         return null;
     }
 
-    const hint = bestOcrHint(match, names);
+    const hint = bestOcrHint(match, names.concat(opts.aliases || []));
     log(
         'FortiToken debug: tapAndCapture "' +
             (match.from || hint) +
@@ -1056,8 +1086,26 @@ async function collectFortiTokenCodes(options = {}) {
         );
     }
 
-    async function captureAndOcr(passName) {
-        await captureScreenPng(device.serial, shot);
+    function logOcrDump(passName) {
+        if (analysis && analysis.dump) {
+            log('FortiToken debug: OCR lines (redacted) ' + analysis.dump);
+            return;
+        }
+        log('FortiToken debug: OCR produced no text pass=' + passName);
+    }
+
+    async function captureAndOcr(passName, opts = {}) {
+        // This clone phone rejects adb screencap. Capture the scrcpy video
+        // window first; PrintWindow avoids Cursor overlapping the pixels.
+        const usePhone = Boolean(opts.phone);
+        const copyFromScreen = Boolean(opts.copyFromScreen);
+        if (usePhone) {
+            await screencapPng(device.serial, shot);
+        } else if (copyFromScreen) {
+            await captureScrcpyWindowPng(shot, ['-SkipPrintWindow']);
+        } else {
+            await captureScreenPng(device.serial, shot);
+        }
         shotReady = true;
         let shotSize = 0;
         try {
@@ -1065,7 +1113,15 @@ async function collectFortiTokenCodes(options = {}) {
         } catch (_err) {
             shotSize = 0;
         }
-        log('FortiToken debug: screen capture ok bytes=' + shotSize + ' pass=' + passName);
+        const source = usePhone ? 'phone' : copyFromScreen ? 'scrcpy-screen' : 'scrcpy';
+        log(
+            'FortiToken debug: screen capture ok bytes=' +
+                shotSize +
+                ' pass=' +
+                passName +
+                ' source=' +
+                source,
+        );
         analysis = await analyzeOcr(shot);
         totpOnScreen = analysis.totp;
         hiddenPrefixes = analysis.hidden;
@@ -1075,6 +1131,89 @@ async function collectFortiTokenCodes(options = {}) {
         }
         applyOcrAnalysis(pending, analysis, log, passName);
         dropDuplicateOcrCodes(pending, log);
+        const looks = ocrLooksLikeFortiToken(analysis);
+        if (!looks && !usePhone && !copyFromScreen) {
+            log('FortiToken debug: PrintWindow is not the token list; retry CopyFromScreen');
+            logOcrDump(passName);
+            await captureAndOcr(passName + '-screen', { copyFromScreen: true });
+            return;
+        }
+        if (!looks && !usePhone) {
+            log('FortiToken debug: scrcpy screenshot is not the token list; capturing the phone instead');
+            logOcrDump(passName);
+            try {
+                await captureAndOcr(passName + '-phone', { phone: true });
+                return;
+            } catch (err) {
+                log(
+                    'FortiToken debug: phone screencap failed: ' +
+                        String((err && err.message) || err || 'unknown') +
+                        ' (this phone often rejects adb screencap)',
+                );
+            }
+        }
+        if (!looks || totpOnScreen === 0 || pending.some((item) => !item.match.code)) {
+            logOcrDump(passName);
+        }
+    }
+
+    const eyesTapped = new Set();
+
+    function eyeKey(item) {
+        return hintPrefix(item.hint) || hintPrefix(item.match && item.match.from) || item.hint;
+    }
+
+    async function tapHiddenEyes(reason) {
+        const toTap = pending.filter((item) => {
+            if (!item.match.eye || !rowNeedsEye(item, totpOnScreen, hiddenPrefixes)) {
+                return false;
+            }
+            const key = eyeKey(item);
+            return key ? !eyesTapped.has(key) : true;
+        });
+        if (!toTap.length) {
+            return false;
+        }
+        log(
+            'FortiToken debug: ' +
+                reason +
+                ' -> tap ' +
+                toTap.length +
+                '/' +
+                pending.length +
+                ' hidden eye(s) once',
+        );
+        for (const item of toTap) {
+            const key = eyeKey(item);
+            log(
+                'FortiToken debug: tap eye CENTER for "' +
+                    item.match.from +
+                    '" at ' +
+                    item.match.eye.x +
+                    ',' +
+                    item.match.eye.y,
+            );
+            await shellQuiet(
+                device.serial,
+                'input tap ' + item.match.eye.x + ' ' + item.match.eye.y,
+            );
+            if (key) {
+                eyesTapped.add(key);
+            }
+            await sleep(220);
+        }
+        await sleep(400);
+        const peek = await peekFortiToken(device.serial);
+        if (!peek.onScreen || /name_edittext|Edit name/i.test(peek.xml || '')) {
+            await leaveSettings(device.serial);
+            const visible = await dumpAccounts(device.serial);
+            logDumpRows(visible);
+            attachDumpToPending(pending, visible);
+        } else if (peek.accounts && peek.accounts.length) {
+            logDumpRows(peek.accounts);
+            attachDumpToPending(pending, peek.accounts);
+        }
+        return true;
     }
 
     try {
@@ -1087,75 +1226,14 @@ async function collectFortiTokenCodes(options = {}) {
         );
     }
 
-    if (!pending.every((item) => item.match.code) && !ocrLooksLikeFortiToken(analysis)) {
-        log('FortiToken debug: OCR does not look like FortiToken list -> launching');
-        await launchFortiToken(device.serial);
-        await leaveSettings(device.serial);
-        try {
-            await captureAndOcr('after-launch');
-        } catch (err) {
-            log(
-                'FortiToken debug: recapture after launch FAILED: ' +
-                    String((err && err.message) || err || 'unknown'),
-            );
-        }
-    }
-
     if (pending.every((item) => item.match.code)) {
         log('FortiToken debug: all accounts OCR ok -> skip dump and eye taps');
     } else {
-        const wantEye = pending.filter((item) => rowNeedsEye(item, totpOnScreen, hiddenPrefixes));
-        if (!wantEye.length) {
-            log(
-                'FortiToken debug: skip eye taps; OCR already sees ' +
-                    totpOnScreen +
-                    ' code(s) but hint match missed some rows',
-            );
-        } else {
-            const missingEyes = wantEye.filter((item) => !item.match.eye);
-            if (missingEyes.length) {
-                log(
-                    'FortiToken debug: dump UI for eye coordinates (' +
-                        missingEyes.length +
-                        ' missing)',
-                );
-                const visible = await dumpAccounts(device.serial);
-                logDumpRows(visible);
-                attachDumpToPending(pending, visible);
-            } else {
-                log('FortiToken debug: using cached eye coordinates');
-            }
-            const toTap = pending.filter(
-                (item) => item.match.eye && rowNeedsEye(item, totpOnScreen, hiddenPrefixes),
-            );
-            if (toTap.length) {
-                log(
-                    'FortiToken debug: OCR missing ' +
-                        toTap.length +
-                        '/' +
-                        pending.length +
-                        ' -> eye tap only those rows',
-                );
-                for (const item of toTap) {
-                    log(
-                        'FortiToken debug: tap eye CENTER for "' +
-                            item.match.from +
-                            '" at ' +
-                            item.match.eye.x +
-                            ',' +
-                            item.match.eye.y,
-                    );
-                    await shellQuiet(
-                        device.serial,
-                        'input tap ' + item.match.eye.x + ' ' + item.match.eye.y,
-                    );
-                    await sleep(200);
-                    await leaveSettings(device.serial);
-                }
-                await sleep(250);
+        if (hiddenPrefixes.length) {
+            await tapHiddenEyes('OCR dashed');
+            if (!pending.every((item) => item.match.code)) {
                 try {
                     await captureAndOcr('pass2');
-                    log('FortiToken debug: after selective eye reveal OCR totp count=' + totpOnScreen);
                 } catch (err) {
                     log(
                         'FortiToken debug: recapture after eye FAILED: ' +
@@ -1166,12 +1244,65 @@ async function collectFortiTokenCodes(options = {}) {
         }
     }
 
+    if (!pending.every((item) => item.match.code)) {
+        log('FortiToken debug: dump UI to confirm the list and which rows are hidden');
+        let visible = [];
+        try {
+            visible = await dumpAccounts(device.serial);
+        } catch (err) {
+            log(
+                'FortiToken debug: UI dump FAILED: ' +
+                    String((err && err.message) || err || 'unknown'),
+            );
+        }
+        logDumpRows(visible);
+        attachDumpToPending(pending, visible);
+        if (!visible.length) {
+            log('FortiToken debug: FortiToken list not on screen -> launching');
+            await launchFortiToken(device.serial);
+            await leaveSettings(device.serial);
+            try {
+                visible = await dumpAccounts(device.serial);
+            } catch (err) {
+                log(
+                    'FortiToken debug: UI dump after launch FAILED: ' +
+                        String((err && err.message) || err || 'unknown'),
+                );
+            }
+            logDumpRows(visible);
+            attachDumpToPending(pending, visible);
+            try {
+                await captureAndOcr('after-launch');
+            } catch (err) {
+                log(
+                    'FortiToken debug: recapture after launch FAILED: ' +
+                        String((err && err.message) || err || 'unknown'),
+                );
+            }
+        }
+        if (!pending.every((item) => item.match.code)) {
+            const tapped = await tapHiddenEyes('dump hidden');
+            if (tapped && !pending.every((item) => item.match.code)) {
+                try {
+                    await captureAndOcr('pass2');
+                    log('FortiToken debug: after selective eye reveal OCR totp count=' + totpOnScreen);
+                } catch (err) {
+                    log(
+                        'FortiToken debug: recapture after eye FAILED: ' +
+                            String((err && err.message) || err || 'unknown'),
+                    );
+                }
+            } else if (!tapped) {
+                log(
+                    'FortiToken debug: skip eye taps; rows are not marked hidden (OCR miss is not a hide)',
+                );
+            }
+        }
+    }
+
     if (pending.some((item) => !item.match.code) && shotReady) {
         try {
             await captureAndOcr('fresh');
-            if (pending.some((item) => !item.match.code) && analysis.dump) {
-                log('FortiToken debug: OCR lines (redacted) ' + analysis.dump);
-            }
         } catch (_err) {
             log('FortiToken debug: fresh capture/OCR failed');
         }
@@ -1188,7 +1319,8 @@ async function collectFortiTokenCodes(options = {}) {
             await waitForFreshWindow(PREFERRED_LEFT_TO_READ);
         }
         if (!match.code) {
-            const allowEye = totpOnScreen === 0 || dashed;
+            const alreadyTapped = Boolean(prefix && eyesTapped.has(prefix));
+            const allowEye = dashed && Boolean(match && match.eye) && !alreadyTapped;
             log(
                 'FortiToken debug: fallback tapAndCapture hint="' +
                     hint +
@@ -1199,10 +1331,13 @@ async function collectFortiTokenCodes(options = {}) {
                 device.serial,
                 match && (match.eye || match.tap) ? match : names,
                 log,
-                { allowEye },
+                { allowEye, aliases: names },
             );
             if (captured) {
                 match = captured;
+                if (allowEye && prefix) {
+                    eyesTapped.add(prefix);
+                }
             }
         }
         log(

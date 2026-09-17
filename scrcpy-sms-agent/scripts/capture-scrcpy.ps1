@@ -1,5 +1,6 @@
 param(
-    [Parameter(Mandatory = $true)][string]$OutPath
+    [Parameter(Mandatory = $true)][string]$OutPath,
+    [switch]$SkipPrintWindow
 )
 
 $ErrorActionPreference = 'Stop'
@@ -103,6 +104,27 @@ function Get-FileSize([string]$Path) {
     return (Get-Item -LiteralPath $Path).Length
 }
 
+if (-not $SkipPrintWindow) {
+    $printed = New-Object System.Drawing.Bitmap $w, $h
+    $gp = [System.Drawing.Graphics]::FromImage($printed)
+    $hdc = $gp.GetHdc()
+    try {
+        [void][ScrcpyCap]::PrintWindow($win.Hwnd, $hdc, 2)
+    } finally {
+        $gp.ReleaseHdc($hdc)
+    }
+    try {
+        Save-Bmp $printed $OutPath
+    } finally {
+        $gp.Dispose()
+        $printed.Dispose()
+    }
+    if ((Get-FileSize $OutPath) -ge 8000) {
+        Write-Output $OutPath
+        exit 0
+    }
+}
+
 $bmp = New-Object System.Drawing.Bitmap $w, $h
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 try {
@@ -111,26 +133,6 @@ try {
 } finally {
     $g.Dispose()
     $bmp.Dispose()
-}
-
-if ((Get-FileSize $OutPath) -ge 8000) {
-    Write-Output $OutPath
-    exit 0
-}
-
-$bmp2 = New-Object System.Drawing.Bitmap $w, $h
-$g2 = [System.Drawing.Graphics]::FromImage($bmp2)
-$hdc = $g2.GetHdc()
-try {
-    [void][ScrcpyCap]::PrintWindow($win.Hwnd, $hdc, 2)
-} finally {
-    $g2.ReleaseHdc($hdc)
-}
-try {
-    Save-Bmp $bmp2 $OutPath
-} finally {
-    $g2.Dispose()
-    $bmp2.Dispose()
 }
 
 $size = Get-FileSize $OutPath

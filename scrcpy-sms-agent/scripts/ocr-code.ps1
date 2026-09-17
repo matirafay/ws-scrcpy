@@ -8,13 +8,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$WarningPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
 Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
+Add-Type -AssemblyName System.Drawing | Out-Null
 
 $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
 $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]
 $null = [Windows.Storage.StorageFile, Windows.Foundation, ContentType = WindowsRuntime]
 $null = [Windows.Storage.Streams.IRandomAccessStream, Windows.Foundation, ContentType = WindowsRuntime]
 $null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Foundation, ContentType = WindowsRuntime]
+$null = [Windows.Graphics.Imaging.BitmapPixelFormat, Windows.Foundation, ContentType = WindowsRuntime]
+$null = [Windows.Graphics.Imaging.BitmapAlphaMode, Windows.Foundation, ContentType = WindowsRuntime]
 $null = [Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType = WindowsRuntime]
 $null = [Windows.Globalization.Language, Windows.Foundation, ContentType = WindowsRuntime]
 
@@ -117,16 +123,16 @@ function CollectAccountSlots([string[]]$lines) {
 }
 
 function SlotLooksHidden([string[]]$lines, [int]$start, [int]$end) {
-    $hasCodeLike = $false
+    # Only treat a row as hidden when OCR actually saw dashes. Missing digits
+    # are an OCR miss, not a hide — tapping the eye would conceal visible codes.
+    $hasDash = $false
     $hasTotp = $false
     for ($i = $start + 1; $i -lt $end; $i++) {
-        if (IsTotpLine $lines[$i]) { $hasTotp = $true; continue }
-        if (IsDashLine $lines[$i]) { continue }
-        if (IsSlotNoise $lines[$i]) { continue }
-        if (IsCodeLikeLine $lines[$i]) { $hasCodeLike = $true }
+        if (IsTotpLine $lines[$i]) { $hasTotp = $true }
+        if (IsDashLine $lines[$i]) { $hasDash = $true }
     }
-    if ($hasTotp -or $hasCodeLike) { return $false }
-    return $true
+    if ($hasTotp) { return $false }
+    return $hasDash
 }
 
 function IsAccountLabel([string]$line) {
@@ -243,6 +249,7 @@ function DumpLinesText([string[]]$lines) {
     $parts = @()
     foreach ($line in $lines) {
         $safe = [regex]::Replace([string]$line, '\d', '#')
+        $safe = [regex]::Replace($safe, '[\u0000-\u001F]', ' ')
         $norm = Normalize $line
         $parts += "L$i norm=$norm safe=$safe"
         $i++
@@ -293,7 +300,7 @@ function AnalyzeText([string[]]$lines) {
             cc = (ResolveHint $lines 'CC-tmalik')
         }
         hidden = @(HiddenPrefixes $lines)
-        dump = DumpLinesText $lines
+        dump = if ($lines -and $lines.Count) { DumpLinesText $lines } else { 'EMPTY_OCR' }
     }
     return ($payload | ConvertTo-Json -Compress -Depth 4)
 }
@@ -309,18 +316,77 @@ if (-not $engine) {
     exit 0
 }
 
-$path = (Resolve-Path -LiteralPath $ImagePath).Path
-$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($path)) ([Windows.Storage.StorageFile])
-$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
-try {
-    $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-    $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-    $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-} finally {
-    $stream.Dispose()
+function RecognizePng([string]$pngPath) {
+    $resolved = (Resolve-Path -LiteralPath $pngPath).Path
+    $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($resolved)) ([Windows.Storage.StorageFile])
+    $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+    try {
+        $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+        $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+        try {
+            $bitmap = [Windows.Graphics.Imaging.SoftwareBitmap]::Convert(
+                $bitmap,
+                [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+                [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied
+            )
+        } catch {
+            # Some PNG frames are already Bgra8; keep the decoded bitmap.
+        }
+        return Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+    } finally {
+        $stream.Dispose()
+    }
 }
 
-$lines = @($result.Lines | ForEach-Object { $_.Text })
+function Save-Inverted([string]$src, [string]$dest) {
+    $bmp = [System.Drawing.Bitmap]::FromFile($src)
+    $out = New-Object System.Drawing.Bitmap $bmp.Width, $bmp.Height
+    $g = [System.Drawing.Graphics]::FromImage($out)
+    $ia = New-Object System.Drawing.Imaging.ImageAttributes
+    $cm = New-Object System.Drawing.Imaging.ColorMatrix (,([float[][]]@(
+        [float[]]@(-1, 0, 0, 0, 0),
+        [float[]]@(0, -1, 0, 0, 0),
+        [float[]]@(0, 0, -1, 0, 0),
+        [float[]]@(0, 0, 0, 1, 0),
+        [float[]]@(1, 1, 1, 0, 1)
+    )))
+    try {
+        $ia.SetColorMatrix($cm)
+        $rect = New-Object System.Drawing.Rectangle 0, 0, $bmp.Width, $bmp.Height
+        $g.DrawImage($bmp, $rect, 0, 0, $bmp.Width, $bmp.Height, [System.Drawing.GraphicsUnit]::Pixel, $ia)
+        if (Test-Path -LiteralPath $dest) {
+            Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+        }
+        $out.Save($dest, [System.Drawing.Imaging.ImageFormat]::Png)
+    } finally {
+        $ia.Dispose()
+        $g.Dispose()
+        $out.Dispose()
+        $bmp.Dispose()
+    }
+}
+
+$path = (Resolve-Path -LiteralPath $ImagePath).Path
+$lines = @()
+try {
+    $result = RecognizePng $path
+    $lines = @($result.Lines | ForEach-Object { $_.Text })
+} catch {
+    $lines = @()
+}
+# Dark FortiToken UI (light digits on black) often OCR as empty until inverted.
+if (-not $lines -or $lines.Count -eq 0) {
+    $inv = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ('scrcpy-sms-ocr-inv-{0}.png' -f $PID))
+    try {
+        Save-Inverted $path $inv
+        $result = RecognizePng $inv
+        $lines = @($result.Lines | ForEach-Object { $_.Text })
+    } catch {
+        # Keep the original empty result.
+    } finally {
+        Remove-Item -LiteralPath $inv -Force -ErrorAction SilentlyContinue
+    }
+}
 
 if ($Analyze) {
     Write-Output (AnalyzeText $lines)

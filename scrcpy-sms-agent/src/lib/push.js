@@ -21,7 +21,7 @@ function isFortiToken(sms) {
 
 function resolveType(sms, options, saved) {
     if (isAuthenticator(sms) || isRingCentral(sms) || isFortiToken(sms)) {
-        return MFA_TYPE_SMS;
+        return MFA_TYPE_SMS; // HealthForce stores these rows as SMS codes (type 1).
     }
     if (options.type !== undefined && options.type !== '') {
         return Number(options.type);
