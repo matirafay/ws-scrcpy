@@ -84,7 +84,10 @@ function IsTotpLine([string]$line) {
 }
 
 function IsDashLine([string]$line) {
-    return [regex]::IsMatch([string]$line, '[-–—•·]{2,}')
+    if ([regex]::IsMatch([string]$line, '[-–—•·●○◉▪■\.]{2,}')) { return $true }
+    if ([regex]::IsMatch([string]$line, '(?i)hidden')) { return $true }
+    $norm = Normalize $line
+    return [bool]($norm -match '^(o|x){4,}$')
 }
 
 function IsSlotNoise([string]$line) {

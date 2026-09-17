@@ -722,6 +722,17 @@ function attachDumpToPending(pending, visible) {
     });
 }
 
+function ocrDumpLooksLikeTokenList(analysis) {
+    const dump = String((analysis && analysis.dump) || '').toLowerCase();
+    if (!dump || dump === 'empty_ocr' || dump.startsWith('parse_fail') || dump.startsWith('non_json')) {
+        return false;
+    }
+    if (/cursortab|cursor tab/.test(dump.replace(/\s/g, ''))) {
+        return false;
+    }
+    return /fortitoken|jjilani|mmehmood|tmalik|\bcm\b|\bcis\b|\bcc\b/.test(dump);
+}
+
 function ocrLooksLikeFortiToken(analysis) {
     if (!analysis) {
         return false;
@@ -736,8 +747,7 @@ function ocrLooksLikeFortiToken(analysis) {
     if (codes.cm || codes.cis || codes.cc) {
         return true;
     }
-    const dump = String(analysis.dump || '').toLowerCase();
-    return /fortitoken|\bcm|\bcis|\bcc/.test(dump);
+    return ocrDumpLooksLikeTokenList(analysis);
 }
 
 function dropDuplicateOcrCodes(pending, logFn) {
@@ -763,14 +773,21 @@ function dropDuplicateOcrCodes(pending, logFn) {
     });
 }
 
-function rowNeedsEye(item, _totpOnScreen, hiddenPrefixes) {
+function rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis) {
     if (!item || item.match.code) {
         return false;
     }
-    // Accessibility almost always reports "hidden" on this FortiToken build, even
-    // when digits are on screen. Only OCR dashed-rows are a safe eye-tap signal.
     const prefix = hintPrefix(item.hint) || hintPrefix(item.match && item.match.from);
-    return Boolean(prefix && hiddenPrefixes && hiddenPrefixes.includes(prefix));
+    if (!prefix) {
+        return false;
+    }
+    if (hiddenPrefixes && hiddenPrefixes.includes(prefix)) {
+        return true;
+    }
+    // Accessibility always says "Hidden value" on this build. If OCR can see the
+    // token list but no digits at all, the eyes are closed — open them once.
+    // If some digits are visible, only dashed rows above are safe to tap.
+    return totpOnScreen === 0 && ocrDumpLooksLikeTokenList(analysis);
 }
 
 function emptyOcrAnalysis() {
@@ -1163,15 +1180,30 @@ async function collectFortiTokenCodes(options = {}) {
         return hintPrefix(item.hint) || hintPrefix(item.match && item.match.from) || item.hint;
     }
 
-    async function tapHiddenEyes(reason) {
+    async function tapHiddenEyes(reason, retried) {
         const toTap = pending.filter((item) => {
-            if (!item.match.eye || !rowNeedsEye(item, totpOnScreen, hiddenPrefixes)) {
+            if (!item.match.eye || !rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis)) {
                 return false;
             }
             const key = eyeKey(item);
             return key ? !eyesTapped.has(key) : true;
         });
         if (!toTap.length) {
+            const want = pending.filter((item) => rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis));
+            if (!retried && want.some((item) => !item.match.eye)) {
+                log('FortiToken debug: dump UI for eye coordinates so hidden rows can be opened');
+                try {
+                    const visible = await dumpAccounts(device.serial);
+                    logDumpRows(visible);
+                    attachDumpToPending(pending, visible);
+                } catch (err) {
+                    log(
+                        'FortiToken debug: UI dump for eyes FAILED: ' +
+                            String((err && err.message) || err || 'unknown'),
+                    );
+                }
+                return tapHiddenEyes(reason, true);
+            }
             return false;
         }
         log(
@@ -1229,8 +1261,9 @@ async function collectFortiTokenCodes(options = {}) {
     if (pending.every((item) => item.match.code)) {
         log('FortiToken debug: all accounts OCR ok -> skip dump and eye taps');
     } else {
-        if (hiddenPrefixes.length) {
-            await tapHiddenEyes('OCR dashed');
+        const needsOpen = pending.some((item) => rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis));
+        if (needsOpen) {
+            await tapHiddenEyes(totpOnScreen === 0 ? 'OCR no digits on token list' : 'OCR dashed');
             if (!pending.every((item) => item.match.code)) {
                 try {
                     await captureAndOcr('pass2');
@@ -1314,7 +1347,9 @@ async function collectFortiTokenCodes(options = {}) {
         const names = item.names;
         const hint = item.hint;
         const prefix = hintPrefix(hint) || hintPrefix(match && match.from);
-        const dashed = Boolean(prefix && hiddenPrefixes.includes(prefix));
+        const dashed =
+            Boolean(prefix && hiddenPrefixes.includes(prefix)) ||
+            rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis);
         if (!match.code && totpRemainingSeconds() < MIN_LEFT_TO_POST && !dashed) {
             await waitForFreshWindow(PREFERRED_LEFT_TO_READ);
         }

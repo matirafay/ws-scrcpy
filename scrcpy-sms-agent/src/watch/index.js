@@ -222,7 +222,7 @@ function startWatch(options = {}) {
 
     log('Posting to ' + getConfig().url);
     log('Config ' + configPath());
-    log('FortiToken: OCR visible codes first; tap eye only for dashed/hidden rows, once per window.');
+    log('FortiToken: keep eyes open — tap only when the token list has no visible digits, once per window.');
     log('Post at the start of each 30s window (target ' + PREFERRED_LEFT_TO_READ + 's+ remaining).');
     run();
     return () => {
