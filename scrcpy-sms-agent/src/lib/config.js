@@ -18,6 +18,7 @@ function getConfig() {
         automationShortCode: process.env.SMS_PUSH_SHORTCODE || 'YOUR_SHORTCODE',
         authenticatorAccount: process.env.SMS_AUTHENTICATOR_ACCOUNT || 'tmalik',
         fortitokenAccount: process.env.SMS_FORTITOKEN_ACCOUNT || 'mahmood',
+        wirelessAdb: process.env.SMS_WIRELESS_ADB || '',
         targets: DEFAULT_TARGETS,
     };
     try {
@@ -33,6 +34,7 @@ function getConfig() {
             automationShortCode: String(raw.automationShortCode || fallback.automationShortCode),
             authenticatorAccount: String(raw.authenticatorAccount || fallback.authenticatorAccount),
             fortitokenAccount: String(raw.fortitokenAccount || fallback.fortitokenAccount),
+            wirelessAdb: String(raw.wirelessAdb || process.env.SMS_WIRELESS_ADB || ''),
             targets,
         };
     } catch (_err) {
@@ -52,6 +54,9 @@ function saveConfig(config) {
         automationShortCode: String((config && config.automationShortCode) || current.automationShortCode || ''),
         authenticatorAccount: String((config && config.authenticatorAccount) || current.authenticatorAccount || ''),
         fortitokenAccount: String((config && config.fortitokenAccount) || current.fortitokenAccount || ''),
+        wirelessAdb: String(
+            (config && config.wirelessAdb !== undefined ? config.wirelessAdb : current.wirelessAdb) || '',
+        ),
         targets: Array.isArray(config && config.targets) && config.targets.length ? config.targets : current.targets,
     };
     fs.writeFileSync(configPath(), JSON.stringify(next, null, 2));

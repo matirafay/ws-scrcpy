@@ -8,6 +8,7 @@
   "automationShortCode": "YOUR_SHORTCODE",
   "authenticatorAccount": "",
   "fortitokenAccount": "mmehmood",
+  "wirelessAdb": "",
   "targets": [
     {
       "source": "fortitoken",

@@ -45,6 +45,19 @@ function isScrcpyRunning() {
     }
 }
 
+function stopScrcpy() {
+    try {
+        execFileSync('taskkill', ['/IM', 'scrcpy.exe', '/F'], {
+            windowsHide: true,
+            encoding: 'utf8',
+            timeout: 8000,
+        });
+        return true;
+    } catch (_err) {
+        return false;
+    }
+}
+
 function lockScrcpyWindow() {
     const script = scriptFile('lock-scrcpy-window.ps1');
     if (!fs.existsSync(script)) {
@@ -108,4 +121,4 @@ async function ensureScrcpyRunning(serial, logFn) {
     return true;
 }
 
-module.exports = { findScrcpy, startScrcpy, ensureScrcpyRunning, lockScrcpyWindow };
+module.exports = { findScrcpy, startScrcpy, ensureScrcpyRunning, isScrcpyRunning, lockScrcpyWindow, stopScrcpy };

@@ -1,4 +1,4 @@
-const { adb, dumpUi, listDevices, parseNodes, shell, withSerial } = require('../lib/adb');
+const { adb, dumpUi, listDevices, parseNodes, pickReadyDevice, shell, withSerial } = require('../lib/adb');
 
 const SMS_PACKAGES = [
     'com.google.android.apps.messaging',
@@ -21,8 +21,8 @@ async function pickDevice(serial) {
     if (!ready.length) {
         throw new Error(
             devices.length
-                ? 'Phone is connected but not authorized. Unlock it and tap Allow USB debugging.'
-                : 'No Android device connected. Plug in the phone, enable USB debugging, then run scrcpy.',
+                ? 'Phone is connected but not authorized. Unlock it and tap Allow USB debugging, or reconnect Wi-Fi debugging.'
+                : 'No Android device connected. Use Wi-Fi debugging first, or plug in USB as fallback, then run scrcpy.',
         );
     }
     if (serial) {
@@ -32,7 +32,7 @@ async function pickDevice(serial) {
         }
         return match;
     }
-    return ready[0];
+    return pickReadyDevice(devices);
 }
 
 async function wake(serial) {

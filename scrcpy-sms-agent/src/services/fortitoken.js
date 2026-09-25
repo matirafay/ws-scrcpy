@@ -2,7 +2,7 @@
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { adb, dumpUi, listDevices, parseNodes, screencapPng, shell, withSerial } = require('../lib/adb');
+const { adb, dumpUi, keepPhonePowered, listDevices, parseNodes, screencapPng, shell, withSerial } = require('../lib/adb');
 const { getConfig } = require('../lib/config');
 const { scriptFile } = require('../lib/paths');
 
@@ -18,6 +18,11 @@ let cachedSearch = null;
 let cachedSearchBottom = 0;
 let cachedActionBarBottom = 0;
 let cachedEyesByPrefix = Object.create(null);
+const DEFAULT_DASH_BY_PREFIX = {
+    cm: { x: 242, y: 399 },
+    cis: { x: 242, y: 562 },
+    cc: { x: 242, y: 725 },
+};
 let clipboardUnlocked = false;
 
 function sleep(ms) {
@@ -34,6 +39,7 @@ async function waitForFreshWindow(minLeft = PREFERRED_LEFT_TO_READ, period = TOT
         return left;
     }
     await sleep(left * 1000 + 400);
+    await sleep(300);
     return totpRemainingSeconds(period);
 }
 
@@ -112,6 +118,26 @@ function nearbyCode(nodes, label) {
     return grouped ? grouped[1] : null;
 }
 
+function dashTapPoint(subtitle, label) {
+    const box = (subtitle && subtitle.boundsBox) || null;
+    if (box) {
+        const width = Math.max(1, box.right - box.left);
+        // FortiToken 6.6: dashes sit in detail_row_subtitle. Stay left of the
+        // countdown donut (~x 500) and chevron (~x 594).
+        return {
+            x: Math.min(box.left + Math.round(width * 0.45), 460),
+            y: Math.round((box.top + box.bottom) / 2),
+        };
+    }
+    if (label && label.boundsBox) {
+        return {
+            x: Math.min(label.boundsBox.left + 180, 460),
+            y: label.boundsBox.bottom + 48,
+        };
+    }
+    return null;
+}
+
 function eyeTapPoint(nodes, label) {
     const nearby = nodes.filter((n) => onSameRow(label, n) && n.boundsBox);
     const labelY = label && label.boundsBox ? label.boundsBox.y : 0;
@@ -122,29 +148,14 @@ function eyeTapPoint(nodes, label) {
     if (eyeBtn && eyeBtn.boundsBox) {
         const box = eyeBtn.boundsBox;
         const width = Math.max(1, box.right - box.left);
-        // hide_button is RIGHT of the OTP/dashes ([402..498] on this phone).
-        // Tap the CENTER of the eye icon. Far-left overlaps the row (opens
-        // detail/edit); right side misses the icon.
         return {
             x: box.left + Math.round(width * 0.5),
             y: Math.round((box.top + box.bottom) / 2),
         };
     }
+    // 6.6 dropped hide_button. Reveal by tapping the dash / Hidden-value band.
     const subtitle = nearby.find((n) => idOf(n).endsWith('detail_row_subtitle') && n.boundsBox);
-    if (subtitle) {
-        // Approximate eye center: mid of the usual ~96px hide button to the right.
-        return {
-            x: subtitle.boundsBox.right + 48,
-            y: Math.round((subtitle.boundsBox.top + subtitle.boundsBox.bottom) / 2),
-        };
-    }
-    if (label && label.boundsBox) {
-        return {
-            x: label.boundsBox.right + 48,
-            y: label.boundsBox.bottom + 48,
-        };
-    }
-    return null;
+    return dashTapPoint(subtitle, label);
 }
 
 function codeTapPoint(nodes, label) {
@@ -242,21 +253,89 @@ function pickAccount(accounts, account) {
     return accounts.find((item) => item.code) || accounts[0] || null;
 }
 
+function xmlLooksLikeTokenList(xml) {
+    const text = String(xml || '');
+    if (/name_edittext|Edit name/i.test(text)) {
+        return false;
+    }
+    return (
+        /detail_row_label/.test(text) ||
+        /otp_list_layout|totp_detail_row_item|OtpTokenListActivity/.test(text)
+    );
+}
+
+async function keepScreenAwake(serial) {
+    await keepPhonePowered(serial);
+}
+
+async function currentFocusLine(serial) {
+    try {
+        const line = await shell(serial, 'dumpsys window | grep mCurrentFocus');
+        if (line) {
+            return line;
+        }
+    } catch (_err) {
+        // grep may be missing on some builds.
+    }
+    try {
+        const dump = await shell(serial, 'dumpsys window');
+        const match = String(dump || '').match(/mCurrentFocus=([^\r\n]+)/);
+        return match ? match[1] : '';
+    } catch (_err) {
+        return '';
+    }
+}
+
 async function launchFortiToken(serial) {
     const device = await pickDevice(serial);
     await shell(device.serial, 'input keyevent KEYCODE_WAKEUP');
-    await adb(
-        withSerial(
-            ['shell', 'monkey', '-p', FTM_PACKAGE, '-c', 'android.intent.category.LAUNCHER', '1'],
-            device.serial,
-        ),
-    );
+    try {
+        await adb(
+            withSerial(
+                [
+                    'shell',
+                    'am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p ' +
+                        FTM_PACKAGE,
+                ],
+                device.serial,
+            ),
+        );
+    } catch (_err) {
+        await adb(
+            withSerial(
+                ['shell', 'monkey -p ' + FTM_PACKAGE + ' -c android.intent.category.LAUNCHER 1'],
+                device.serial,
+            ),
+        );
+    }
     await sleep(900);
     return { ok: true, package: FTM_PACKAGE, device, restarted: false };
 }
 
 async function openFortiToken(serial) {
     return launchFortiToken(serial);
+}
+
+async function ensureFortiTokenAlive(serial, logFn) {
+    const log = typeof logFn === 'function' ? logFn : () => {};
+    await keepScreenAwake(serial);
+    await shellQuiet(serial, 'input keyevent KEYCODE_WAKEUP');
+    const focus = await currentFocusLine(serial);
+    if (/OtpTokenListActivity/i.test(focus)) {
+        return true;
+    }
+    if (/fortinet\.android\.ftm|fortitoken\./i.test(focus)) {
+        log('FortiToken is on a sub-screen -> return to the token list');
+        await leaveSettings(serial);
+        return true;
+    }
+    log('FortiToken is not in front -> opening it so revealed codes can stay visible');
+    await launchFortiToken(serial);
+    const after = await peekFortiToken(serial);
+    if (/name_edittext|Edit name/i.test(after.xml || '')) {
+        await leaveSettings(serial);
+    }
+    return true;
 }
 
 async function dumpAccounts(serial) {
@@ -474,12 +553,7 @@ async function tapCode(serial, account) {
 async function leaveSettings(serial) {
     for (let i = 0; i < 5; i++) {
         const xml = await dumpUi(serial);
-        const onList =
-            /detail_row_label/.test(xml) &&
-            /detail_row_hide_button/.test(xml) &&
-            !/name_edittext/.test(xml) &&
-            !/Edit name/i.test(xml);
-        if (onList) {
+        if (xmlLooksLikeTokenList(xml)) {
             return;
         }
         const onEditDialog = /name_edittext/.test(xml) || /Edit name/i.test(xml);
@@ -677,7 +751,10 @@ function rememberEyesFromAccounts(accounts) {
 
 function cachedEyeFor(hint, from) {
     const prefix = hintPrefix(hint) || hintPrefix(from);
-    return prefix && cachedEyesByPrefix[prefix] ? cachedEyesByPrefix[prefix] : null;
+    if (!prefix) {
+        return null;
+    }
+    return cachedEyesByPrefix[prefix] || DEFAULT_DASH_BY_PREFIX[prefix] || null;
 }
 
 function syntheticAccountMatch(names) {
@@ -784,10 +861,8 @@ function rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis) {
     if (hiddenPrefixes && hiddenPrefixes.includes(prefix)) {
         return true;
     }
-    // Accessibility always says "Hidden value" on this build. If OCR can see the
-    // token list but no digits at all, the eyes are closed — open them once.
-    // If some digits are visible, only dashed rows above are safe to tap.
-    return totpOnScreen === 0 && ocrDumpLooksLikeTokenList(analysis);
+    // Token list is on screen but this row has no digits — tap its dash band.
+    return ocrDumpLooksLikeTokenList(analysis);
 }
 
 function emptyOcrAnalysis() {
@@ -994,15 +1069,18 @@ async function tapAndCapture(serial, account, logFn, opts = {}) {
 
     if (!match.code && allowEye && match.eye) {
         log(
-            'FortiToken debug: no OCR digits -> tap eye center at ' +
+            'FortiToken debug: no OCR digits -> tap dashes at ' +
                 match.eye.x +
                 ',' +
                 match.eye.y,
         );
         await shellQuiet(serial, 'input tap ' + match.eye.x + ' ' + match.eye.y);
         await sleep(450);
-        await leaveSettings(serial);
-        const afterPeek = await peekFortiToken(serial);
+        let afterPeek = await peekFortiToken(serial);
+        if (/name_edittext|Edit name/i.test(afterPeek.xml || '')) {
+            await leaveSettings(serial);
+            afterPeek = await peekFortiToken(serial);
+        }
         log(
             'FortiToken debug: after eye tap onList=' +
                 Boolean(afterPeek.onScreen && afterPeek.accounts && afterPeek.accounts.length) +
@@ -1039,7 +1117,7 @@ async function tapAndCapture(serial, account, logFn, opts = {}) {
             }
         }
     } else if (!match.code && !allowEye) {
-        log('FortiToken debug: skip eye tap (digits already on screen; hint match failed)');
+        log('FortiToken debug: skip dash tap (digits already on screen; hint match failed)');
     }
 
     if (!match.code) {
@@ -1066,6 +1144,7 @@ async function shellQuiet(serial, command) {
 async function collectFortiTokenCodes(options = {}) {
     const log = typeof options.log === 'function' ? options.log : () => {};
     const device = await pickDevice(options.serial);
+    await ensureFortiTokenAlive(device.serial, log);
     const queries = options.accounts || [];
     const pending = [];
     for (const account of queries) {
@@ -1191,7 +1270,7 @@ async function collectFortiTokenCodes(options = {}) {
         if (!toTap.length) {
             const want = pending.filter((item) => rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis));
             if (!retried && want.some((item) => !item.match.eye)) {
-                log('FortiToken debug: dump UI for eye coordinates so hidden rows can be opened');
+                log('FortiToken debug: dump UI for dash coordinates so hidden rows can be opened');
                 try {
                     const visible = await dumpAccounts(device.serial);
                     logDumpRows(visible);
@@ -1213,12 +1292,12 @@ async function collectFortiTokenCodes(options = {}) {
                 toTap.length +
                 '/' +
                 pending.length +
-                ' hidden eye(s) once',
+                ' dash row(s) once',
         );
         for (const item of toTap) {
             const key = eyeKey(item);
             log(
-                'FortiToken debug: tap eye CENTER for "' +
+                'FortiToken debug: tap dashes for "' +
                     item.match.from +
                     '" at ' +
                     item.match.eye.x +
@@ -1232,19 +1311,9 @@ async function collectFortiTokenCodes(options = {}) {
             if (key) {
                 eyesTapped.add(key);
             }
-            await sleep(220);
+            await sleep(120);
         }
-        await sleep(400);
-        const peek = await peekFortiToken(device.serial);
-        if (!peek.onScreen || /name_edittext|Edit name/i.test(peek.xml || '')) {
-            await leaveSettings(device.serial);
-            const visible = await dumpAccounts(device.serial);
-            logDumpRows(visible);
-            attachDumpToPending(pending, visible);
-        } else if (peek.accounts && peek.accounts.length) {
-            logDumpRows(peek.accounts);
-            attachDumpToPending(pending, peek.accounts);
-        }
+        await sleep(280);
         return true;
     }
 
@@ -1293,7 +1362,10 @@ async function collectFortiTokenCodes(options = {}) {
         if (!visible.length) {
             log('FortiToken debug: FortiToken list not on screen -> launching');
             await launchFortiToken(device.serial);
-            await leaveSettings(device.serial);
+            const afterLaunch = await peekFortiToken(device.serial);
+            if (/name_edittext|Edit name/i.test(afterLaunch.xml || '')) {
+                await leaveSettings(device.serial);
+            }
             try {
                 visible = await dumpAccounts(device.serial);
             } catch (err) {
@@ -1327,7 +1399,7 @@ async function collectFortiTokenCodes(options = {}) {
                 }
             } else if (!tapped) {
                 log(
-                    'FortiToken debug: skip eye taps; rows are not marked hidden (OCR miss is not a hide)',
+                    'FortiToken debug: skip dash taps; rows are not marked hidden (OCR miss is not a hide)',
                 );
             }
         }
@@ -1339,6 +1411,23 @@ async function collectFortiTokenCodes(options = {}) {
         } catch (_err) {
             log('FortiToken debug: fresh capture/OCR failed');
         }
+    }
+
+    if (options.revealOnly) {
+        const visible = pending.filter((item) => item.match && item.match.code).length;
+        log(
+            'FortiToken: keep-visible pass done (' +
+                visible +
+                '/' +
+                pending.length +
+                ' codes showing).',
+        );
+        try {
+            fs.unlinkSync(shot);
+        } catch (_err) {
+            // ignore
+        }
+        return pending.map((item) => item.match).filter(Boolean);
     }
 
     const results = [];
@@ -1403,6 +1492,10 @@ async function collectFortiTokenCodes(options = {}) {
     }
     return results;
 }
+async function keepCodesVisible(options = {}) {
+    return collectFortiTokenCodes(Object.assign({}, options, { revealOnly: true }));
+}
+
 async function tapRefresh(serial, account) {
     return tapCode(serial, account);
 }
@@ -1419,8 +1512,11 @@ async function ensureCodesVisible(serial, account) {
 
     if (!peek.onScreen) {
         await launchFortiToken(serial);
-        await leaveSettings(serial);
         peek = await peekFortiToken(serial, account);
+        if (/name_edittext|Edit name/i.test(peek.xml || '')) {
+            await leaveSettings(serial);
+            peek = await peekFortiToken(serial, account);
+        }
         if (peek.onScreen && digitsAreShowing(peek.match)) {
             return { match: peek.match, restarted: false, tapped: false, reason: 'opened' };
         }
@@ -1515,6 +1611,7 @@ module.exports = {
     getLatestFortiToken,
     listFortiTokenAccounts,
     collectFortiTokenCodes,
+    keepCodesVisible,
     openFortiToken,
     tapRefresh,
     totpRemainingSeconds,

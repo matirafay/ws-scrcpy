@@ -87,7 +87,9 @@ function IsDashLine([string]$line) {
     if ([regex]::IsMatch([string]$line, '[-–—•·●○◉▪■\.]{2,}')) { return $true }
     if ([regex]::IsMatch([string]$line, '(?i)hidden')) { return $true }
     $norm = Normalize $line
-    return [bool]($norm -match '^(o|x){4,}$')
+    # 6.6 often OCRs each hidden row as a single hollow circle / O.
+    if ($norm -match '^(o|x|0){1,}$') { return $true }
+    return $false
 }
 
 function IsSlotNoise([string]$line) {
@@ -242,6 +244,25 @@ function HiddenPrefixes([string[]]$lines) {
         $end = if (($li + 1) -lt $labels.Count) { $labels[$li + 1].Index } else { $lines.Count }
         if (SlotLooksHidden $lines $lab.Index $end) {
             $hidden += $lab.Prefix
+        }
+    }
+    # 6.6 draws dashes as circles after the names, not between labels.
+    $anyDash = $false
+    foreach ($line in $lines) {
+        if (IsDashLine $line) { $anyDash = $true; break }
+    }
+    if ($anyDash -and @($rows.Totps).Count -eq 0) {
+        foreach ($lab in $labels) { $hidden += $lab.Prefix }
+    } elseif ($anyDash) {
+        # Partial hide: a label with no digits in its slot is dashed.
+        for ($li = 0; $li -lt $labels.Count; $li++) {
+            $lab = $labels[$li]
+            $end = if (($li + 1) -lt $labels.Count) { $labels[$li + 1].Index } else { $lines.Count }
+            $hasTotp = $false
+            foreach ($t in @($rows.Totps)) {
+                if ($t.Index -gt $lab.Index -and $t.Index -lt $end) { $hasTotp = $true; break }
+            }
+            if (-not $hasTotp) { $hidden += $lab.Prefix }
         }
     }
     return @($hidden | Select-Object -Unique)

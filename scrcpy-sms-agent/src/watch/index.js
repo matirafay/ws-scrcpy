@@ -1,9 +1,10 @@
 const { listDevices } = require('../services/sms');
-const { collectFortiTokenCodes, waitForFreshWindow, totpRemainingSeconds, PREFERRED_LEFT_TO_READ, MIN_LEFT_TO_POST } = require('../services/fortitoken');
+const { recoverAdb, usbWaitMessage, ensureWirelessAdb, pickReadyDevice, isWirelessSerial, keepPhonePowered } = require('../lib/adb');
+const { collectFortiTokenCodes, keepCodesVisible, waitForFreshWindow, totpRemainingSeconds, PREFERRED_LEFT_TO_READ, MIN_LEFT_TO_POST } = require('../services/fortitoken');
 const { pushSms } = require('../lib/push');
 const { getConfig, configPath } = require('../lib/config');
 const { DEFAULT_TARGETS } = require('../lib/defaults');
-const { ensureScrcpyRunning } = require('../services/scrcpy');
+const { ensureScrcpyRunning, isScrcpyRunning, stopScrcpy } = require('../services/scrcpy');
 const fs = require('fs');
 const path = require('path');
 
@@ -17,7 +18,7 @@ function loadState() {
     try {
         return JSON.parse(fs.readFileSync(statePath(), 'utf8'));
     } catch (_err) {
-        return { lastSentCode: '', lastSent: {} };
+        return { lastSentCode: '', lastSent: {}, lastSentWindow: {}, lastSentAt: {} };
     }
 }
 
@@ -59,9 +60,17 @@ async function pushNewCode(sms, state, log, target) {
     if (!state.lastSent) {
         state.lastSent = {};
     }
+    if (!state.lastSentWindow) {
+        state.lastSentWindow = {};
+    }
+    if (!state.lastSentAt) {
+        state.lastSentAt = {};
+    }
     const key = target.automationShortCode + ':' + target.title;
     const left = totpRemainingSeconds();
+    const windowId = Math.floor(Date.now() / 1000 / 30);
     const enough = left >= MIN_SECONDS_TO_SEND;
+    const ageMs = Date.now() - Number(state.lastSentAt[key] || 0);
     log(
         '"' +
             target.title +
@@ -71,8 +80,12 @@ async function pushNewCode(sms, state, log, target) {
             (enough ? 'Enough to send to the endpoint.' : 'Not enough to send. ' + waitMessage(left)),
     );
     if (state.lastSent[key] === sms.code) {
-        log('Code not updated for "' + target.title + '". ' + waitMessage(left));
-        return false;
+        if (!state.lastSentAt[key] || ageMs < 28000) {
+            log('Already posted "' + target.title + '" this window. ' + waitMessage(left));
+            return 'done';
+        }
+        log('Screen still shows the previous window for "' + target.title + '". Waiting for new digits.');
+        return 'stale';
     }
     if (!enough) {
         return false;
@@ -82,6 +95,8 @@ async function pushNewCode(sms, state, log, target) {
         automationShortCode: target.automationShortCode,
     });
     state.lastSent[key] = sms.code;
+    state.lastSentWindow[key] = windowId;
+    state.lastSentAt[key] = Date.now();
     state.lastSentCode = sms.code;
     saveState(state);
     const reply = String((result.inbox && result.inbox.body) || '')
@@ -101,7 +116,7 @@ async function pushNewCode(sms, state, log, target) {
             (reply ? ' reply=' + reply : '') +
             '). Copy it now.',
     );
-    return true;
+    return 'posted';
 }
 
 function startWatch(options = {}) {
@@ -114,34 +129,137 @@ function startWatch(options = {}) {
         return totpRemainingSeconds() * 1000 + 450;
     }
 
+    let lastWaitLog = '';
+    let lastWaitAt = 0;
+    let lastRecoverAt = Date.now();
+    let lastWifiAttemptAt = 0;
+    let lastTransportLog = '';
+    let lastChargeAt = 0;
+    let lastChargeLog = '';
+    let powerBusy = false;
+    let stoppedZombie = false;
+    let pendingReveal = false;
+    let pendingRetry = false;
+
     async function tick() {
-        const devices = await listDevices();
-        const ready = devices.filter((device) => device.state === 'device');
-        if (!ready.length) {
-            log('Waiting for an authorized USB phone.');
-            return { posted: 0, needed: 0, retrySoon: true };
+        const now = Date.now();
+        let devices = await listDevices();
+        let readyDevice = pickReadyDevice(devices);
+        const wifiReady = !!(readyDevice && isWirelessSerial(readyDevice.serial));
+        if (!wifiReady && (!readyDevice || now - lastWifiAttemptAt > 20000)) {
+            lastWifiAttemptAt = now;
+            const wireless = await ensureWirelessAdb(log);
+            if (wireless) {
+                readyDevice = wireless;
+            }
         }
-        await ensureScrcpyRunning(ready[0].serial, log);
+        if (!readyDevice) {
+            if (!stoppedZombie && isScrcpyRunning()) {
+                stopScrcpy();
+                stoppedZombie = true;
+                log('Stopped the leftover phone mirror until debugging is available.');
+            }
+            if (now - lastRecoverAt > 45000) {
+                lastRecoverAt = now;
+                try {
+                    await recoverAdb();
+                    log('Restarted ADB and looking for the phone again (Wi-Fi first, USB fallback).');
+                    readyDevice = await ensureWirelessAdb(log);
+                } catch (err) {
+                    log('ADB restart failed: ' + String((err && err.message) || err || 'unknown'));
+                }
+            }
+            if (readyDevice) {
+                stoppedZombie = false;
+            } else {
+                const message = await usbWaitMessage(devices);
+                if (message !== lastWaitLog || now - lastWaitAt > 20000) {
+                    lastWaitLog = message;
+                    lastWaitAt = now;
+                    log(message);
+                }
+                return { posted: 0, needed: 0, retrySoon: true, waitMs: 5000 };
+            }
+        }
+        stoppedZombie = false;
+        lastWaitLog = '';
+        const transport = isWirelessSerial(readyDevice.serial) ? 'wifi' : 'usb';
+        const transportLog =
+            transport === 'wifi'
+                ? 'Using Wi-Fi debugging: ' + readyDevice.serial
+                : 'Using USB debugging as fallback: ' + readyDevice.serial;
+        if (transportLog !== lastTransportLog) {
+            lastTransportLog = transportLog;
+            log(transportLog);
+        }
+        if (!powerBusy && now - lastChargeAt > 45000) {
+            lastChargeAt = now;
+            powerBusy = true;
+            const serial = readyDevice.serial;
+            keepPhonePowered(serial)
+                .then((battery) => {
+                    const level = battery.level != null ? battery.level + '%' : 'unknown';
+                    let chargeLog;
+                    if (battery.charging) {
+                        chargeLog =
+                            'Phone is charging (' +
+                            level +
+                            '). USB cable stays connected so it does not turn off or shut down.';
+                    } else if (battery.plugged || battery.usb) {
+                        chargeLog =
+                            'USB is plugged but the phone is NOT charging (' +
+                            level +
+                            ', discharging). This PC USB hub only offers 500mA data power. Plug the same cable into a wall charger or a rear motherboard USB port so the phone does not shut down. Wi-Fi debugging can stay connected.';
+                    } else {
+                        chargeLog =
+                            'Phone is NOT charging (' +
+                            level +
+                            '). Plug the USB cable into a wall charger or a rear USB port so it does not turn off or shut down.';
+                    }
+                    if (chargeLog !== lastChargeLog || !battery.charging) {
+                        lastChargeLog = chargeLog;
+                        log(chargeLog);
+                    }
+                })
+                .catch(() => {})
+                .then(() => {
+                    powerBusy = false;
+                });
+        }
+        await ensureScrcpyRunning(readyDevice.serial, log);
+        const targets = targetsFromConfig().filter((item) => item.source === 'fortitoken');
+        const accounts = targets.map((item) => [item.account].concat(item.aliases || []));
         const left = totpRemainingSeconds();
-        if (left < PREFERRED_LEFT_TO_READ) {
-            log(
-                'Time remaining ' +
-                    left +
-                    's. Waiting for the next 30s window so codes can be posted with more time left.',
-            );
+        const retryThisWindow = pendingRetry && left >= MIN_SECONDS_TO_SEND;
+        pendingRetry = false;
+        if (retryThisWindow) {
+            log('Retrying this window: ' + left + 's left. Reading and posting now.');
+        } else if (pendingReveal || left < MIN_SECONDS_TO_SEND) {
+            pendingReveal = false;
+            if (left >= 16) {
+                log('Keeping codes visible before the next read (' + left + 's left).');
+                try {
+                    await keepCodesVisible({ accounts, log });
+                } catch (err) {
+                    log('Keep-visible failed: ' + String((err && err.message) || err || 'unknown'));
+                }
+            } else {
+                log(
+                    'Time remaining ' +
+                        left +
+                        's. Waiting for the new codes instead of a late reveal.',
+                );
+            }
+            await waitForFreshWindow(PREFERRED_LEFT_TO_READ);
+            log('Fresh window: ' + totpRemainingSeconds() + 's left. Reading and posting now.');
         } else {
             log('Fresh window: ' + left + 's left. Reading and posting now.');
         }
-        await waitForFreshWindow(PREFERRED_LEFT_TO_READ);
-        const afterWait = totpRemainingSeconds();
-        if (afterWait !== left && afterWait >= PREFERRED_LEFT_TO_READ) {
-            log('Fresh window: ' + afterWait + 's left. Reading and posting now.');
-        }
-        const targets = targetsFromConfig().filter((item) => item.source === 'fortitoken');
         const codesThisCycle = new Map();
         const postedTitles = new Set();
+        let staleCount = 0;
         await collectFortiTokenCodes({
-            accounts: targets.map((item) => [item.account].concat(item.aliases || [])),
+            accounts,
             log,
             onCaptured: async (sms) => {
                 const target = targets.find((item) => matchTarget(sms, item));
@@ -169,11 +287,15 @@ function startWatch(options = {}) {
                     );
                     return;
                 }
-                const key = target.automationShortCode + ':' + target.title;
                 const posted = await pushNewCode(sms, state, log, target);
-                if (posted || (state.lastSent && state.lastSent[key] === sms.code)) {
+                if (posted === 'posted' || posted === 'done') {
                     postedTitles.add(target.title);
                     codesThisCycle.set(sms.code, target.title);
+                } else if (posted === 'stale') {
+                    staleCount += 1;
+                    if (!codesThisCycle.has(sms.code)) {
+                        codesThisCycle.set(sms.code, target.title);
+                    }
                 } else if (!codesThisCycle.has(sms.code)) {
                     codesThisCycle.set(sms.code, target.title);
                 }
@@ -181,6 +303,17 @@ function startWatch(options = {}) {
         });
         const remaining = totpRemainingSeconds();
         const needed = targets.length;
+        if (staleCount >= needed && postedTitles.size === 0) {
+            if (remaining >= 18) {
+                return { posted: 0, needed, retrySoon: true };
+            }
+            return {
+                posted: 0,
+                needed,
+                retrySoon: false,
+                waitForNext: true,
+            };
+        }
         const retrySoon = postedTitles.size < needed && remaining >= MIN_SECONDS_TO_SEND;
         return { posted: postedTitles.size, needed, retrySoon };
     }
@@ -200,11 +333,24 @@ function startWatch(options = {}) {
         }
         const remaining = totpRemainingSeconds();
         let delayMs;
-        if (outcome.retrySoon) {
-            delayMs = 1000;
+        if (outcome.waitMs) {
+            delayMs = outcome.waitMs;
+        } else if (outcome.waitForNext) {
+            pendingRetry = false;
+            pendingReveal = false;
+            delayMs = Math.max(400, totpRemainingSeconds() * 1000 + 1500);
+            log(
+                'Old digits still on screen. Posting as soon as the next 30s window starts (' +
+                    remaining +
+                    's).',
+            );
+        } else if (outcome.retrySoon) {
+            pendingRetry = true;
+            pendingReveal = false;
+            delayMs = 600;
             if (outcome.needed) {
                 log(
-                    'Retry in 1s (' +
+                    'Retry in 0.6s (' +
                         outcome.posted +
                         '/' +
                         outcome.needed +
@@ -214,16 +360,25 @@ function startWatch(options = {}) {
                 );
             }
         } else {
-            delayMs = msUntilNextWindow();
-            log('Next read at the start of the next 30s window (' + remaining + 's).');
+            const leftNow = totpRemainingSeconds();
+            if (leftNow > 18) {
+                pendingReveal = true;
+                pendingRetry = false;
+                delayMs = Math.max(400, (leftNow - 18) * 1000);
+                log('Keeping codes visible 18s before the next window (' + leftNow + 's).');
+            } else {
+                delayMs = msUntilNextWindow();
+                log('Next read at the start of the next 30s window (' + leftNow + 's).');
+            }
         }
         timer = setTimeout(run, Math.max(400, delayMs));
     }
 
     log('Posting to ' + getConfig().url);
     log('Config ' + configPath());
-    log('FortiToken: keep eyes open — tap only when the token list has no visible digits, once per window.');
-    log('Post at the start of each 30s window (target ' + PREFERRED_LEFT_TO_READ + 's+ remaining).');
+    log('Policy: Wi-Fi debugging first, USB debugging fallback.');
+    log('Policy: USB cable stays connected for charging so the phone does not turn off or shut down.');
+    log('Policy: keep FortiToken in front with codes visible; post CC/CM/CIS at the start of each 30s window.');
     run();
     return () => {
         stopped = true;
