@@ -20,4 +20,4 @@ function configExample() {
     return path.join(appRoot(), 'config.example.json');
 }
 
-module.exports = { srcDir, appRoot, scriptFile, vendorAdb, configExample };
+module.exports = { appRoot, scriptFile, vendorAdb, configExample };

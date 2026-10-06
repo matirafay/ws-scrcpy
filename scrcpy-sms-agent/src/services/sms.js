@@ -276,7 +276,6 @@ module.exports = {
     extractCode,
     filterToday,
     getLatestSms,
-    isToday,
     listDevices,
     openSmsApp,
     pickMessage,

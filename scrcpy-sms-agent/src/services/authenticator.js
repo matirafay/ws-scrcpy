@@ -3,7 +3,6 @@ const { getConfig } = require('../lib/config');
 
 const AUTH_PACKAGE = 'com.google.android.apps.authenticator2';
 const TOTP_PERIOD_SEC = 30;
-const MIN_REMAINING_SEC = 18;
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -43,15 +42,6 @@ function normalizeTotp(text) {
 
 function totpRemainingSeconds(period = TOTP_PERIOD_SEC) {
     return period - (Math.floor(Date.now() / 1000) % period);
-}
-
-async function waitForFreshTotp(minRemaining = MIN_REMAINING_SEC) {
-    const left = totpRemainingSeconds();
-    if (left >= minRemaining) {
-        return left;
-    }
-    await sleep(left * 1000 + 900);
-    return totpRemainingSeconds();
 }
 
 function parseAccounts(nodes) {
@@ -144,37 +134,6 @@ async function readFreshAccount(serial, account) {
     return latest;
 }
 
-async function collectAuthenticatorCodes(options = {}) {
-    const opened = await openAuthenticator(options.serial);
-    const needles = (options.accounts || []).map((name) => String(name || '').trim().toLowerCase()).filter(Boolean);
-    const found = new Map();
-    for (let pass = 0; pass < 10 && (needles.length === 0 || found.size < needles.length); pass++) {
-        const batch = await dumpAccounts(opened.device.serial);
-        for (const item of batch) {
-            const key = item.from.toLowerCase();
-            const wanted = !needles.length || needles.some((needle) => key.includes(needle));
-            if (wanted && item.code && !found.has(key)) {
-                found.set(key, {
-                    device: opened.device,
-                    package: AUTH_PACKAGE,
-                    source: 'authenticator',
-                    from: item.from,
-                    body: item.from,
-                    code: item.code,
-                    remainingSeconds: totpRemainingSeconds(),
-                    time: totpRemainingSeconds() + 's left',
-                });
-            }
-        }
-        if (needles.length && found.size >= needles.length) {
-            break;
-        }
-        await shell(opened.device.serial, 'input swipe 540 1900 540 700 280');
-        await sleep(450);
-    }
-    return Array.from(found.values());
-}
-
 async function getLatestAuthenticator(options = {}) {
     const opened = await openAuthenticator(options.serial);
     const saved = getConfig();
@@ -205,8 +164,5 @@ async function getLatestAuthenticator(options = {}) {
 
 module.exports = {
     getLatestAuthenticator,
-    collectAuthenticatorCodes,
     openAuthenticator,
-    totpRemainingSeconds,
-    waitForFreshTotp,
 };

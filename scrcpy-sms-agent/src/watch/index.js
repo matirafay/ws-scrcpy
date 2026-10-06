@@ -1,6 +1,5 @@
-const { listDevices } = require('../services/sms');
-const { recoverAdb, usbWaitMessage, ensureWirelessAdb, pickReadyDevice, isWirelessSerial, keepPhonePowered } = require('../lib/adb');
-const { collectFortiTokenCodes, keepCodesVisible, waitForFreshWindow, totpRemainingSeconds, PREFERRED_LEFT_TO_READ, MIN_LEFT_TO_POST } = require('../services/fortitoken');
+const { recoverAdb, usbWaitMessage, ensureWirelessAdb, pickReadyDevice, isWirelessSerial, keepPhonePowered, listDevices, releaseUsbDataForCharging } = require('../lib/adb');
+const { collectFortiTokenCodes, keepCodesVisible, waitForFreshWindow, totpRemainingSeconds, PREFERRED_LEFT_TO_READ, MIN_LEFT_TO_POST, ensureFortiTokenAlive } = require('../services/fortitoken');
 const { pushSms } = require('../lib/push');
 const { getConfig, configPath } = require('../lib/config');
 const { DEFAULT_TARGETS } = require('../lib/defaults');
@@ -140,6 +139,7 @@ function startWatch(options = {}) {
     let stoppedZombie = false;
     let pendingReveal = false;
     let pendingRetry = false;
+    let hadReadyDevice = false;
 
     async function tick() {
         const now = Date.now();
@@ -172,6 +172,7 @@ function startWatch(options = {}) {
             if (readyDevice) {
                 stoppedZombie = false;
             } else {
+                hadReadyDevice = false;
                 const message = await usbWaitMessage(devices);
                 if (message !== lastWaitLog || now - lastWaitAt > 20000) {
                     lastWaitLog = message;
@@ -183,6 +184,15 @@ function startWatch(options = {}) {
         }
         stoppedZombie = false;
         lastWaitLog = '';
+        if (!hadReadyDevice) {
+            hadReadyDevice = true;
+            log('Phone is back. Waking, swiping unlock, opening FortiToken.');
+            try {
+                await ensureFortiTokenAlive(readyDevice.serial, log);
+            } catch (err) {
+                log('Wake/swipe/FortiToken failed: ' + String((err && err.message) || err || 'unknown'));
+            }
+        }
         const transport = isWirelessSerial(readyDevice.serial) ? 'wifi' : 'usb';
         const transportLog =
             transport === 'wifi'
@@ -191,6 +201,9 @@ function startWatch(options = {}) {
         if (transportLog !== lastTransportLog) {
             lastTransportLog = transportLog;
             log(transportLog);
+        }
+        if (transport === 'wifi') {
+            releaseUsbDataForCharging(log).catch(() => {});
         }
         if (!powerBusy && now - lastChargeAt > 45000) {
             lastChargeAt = now;
@@ -209,7 +222,7 @@ function startWatch(options = {}) {
                         chargeLog =
                             'USB is plugged but the phone is NOT charging (' +
                             level +
-                            ', discharging). This PC USB hub only offers 500mA data power. Plug the same cable into a wall charger or a rear motherboard USB port so the phone does not shut down. Wi-Fi debugging can stay connected.';
+                            '). The I15 Pro Max USB data device in Device Manager blocks charging on this phone. Releasing that device so the cable can charge.';
                     } else {
                         chargeLog =
                             'Phone is NOT charging (' +

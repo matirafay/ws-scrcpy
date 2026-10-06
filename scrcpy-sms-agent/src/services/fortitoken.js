@@ -3,14 +3,12 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { adb, dumpUi, keepPhonePowered, listDevices, parseNodes, screencapPng, shell, withSerial } = require('../lib/adb');
-const { getConfig } = require('../lib/config');
 const { scriptFile } = require('../lib/paths');
 
 const FTM_PACKAGE = 'com.fortinet.android.ftm';
 const TOTP_PERIOD_SEC = 30;
 const MIN_LEFT_TO_POST = 8;
 const PREFERRED_LEFT_TO_READ = 22;
-const MIN_LEFT_TO_COPY = PREFERRED_LEFT_TO_READ;
 const LIST_SAFE_TAP = { x: 540, y: 210 };
 // Only clamp below a real search field. A hard floor (e.g. 400) misses the
  // first FortiToken rows on shorter phones / action-bar layouts.
@@ -23,7 +21,6 @@ const DEFAULT_DASH_BY_PREFIX = {
     cis: { x: 242, y: 562 },
     cc: { x: 242, y: 725 },
 };
-let clipboardUnlocked = false;
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -286,9 +283,16 @@ async function currentFocusLine(serial) {
     }
 }
 
+async function wakeUnlockPhone(serial) {
+    await shellQuiet(serial, 'input keyevent KEYCODE_WAKEUP');
+    await sleep(450);
+    await shellQuiet(serial, 'input swipe 540 1700 540 600 300');
+    await sleep(500);
+}
+
 async function launchFortiToken(serial) {
     const device = await pickDevice(serial);
-    await shell(device.serial, 'input keyevent KEYCODE_WAKEUP');
+    await wakeUnlockPhone(device.serial);
     try {
         await adb(
             withSerial(
@@ -312,14 +316,10 @@ async function launchFortiToken(serial) {
     return { ok: true, package: FTM_PACKAGE, device, restarted: false };
 }
 
-async function openFortiToken(serial) {
-    return launchFortiToken(serial);
-}
-
 async function ensureFortiTokenAlive(serial, logFn) {
     const log = typeof logFn === 'function' ? logFn : () => {};
     await keepScreenAwake(serial);
-    await shellQuiet(serial, 'input keyevent KEYCODE_WAKEUP');
+    await wakeUnlockPhone(serial);
     const focus = await currentFocusLine(serial);
     if (/OtpTokenListActivity/i.test(focus)) {
         return true;
@@ -376,124 +376,6 @@ async function peekFortiToken(serial, account) {
     };
 }
 
-function digitsAreShowing(match) {
-    return Boolean(match && match.code);
-}
-
-function isOtp(code) {
-    return /^\d{6,8}$/.test(code) && !/^0+$/.test(code);
-}
-
-function digitsFromClipboardText(text) {
-    const raw = String(text || '').trim();
-    if (!raw) {
-        return null;
-    }
-    if (/Result:\s*Parcel/i.test(raw) || /0x[0-9a-f]+:/i.test(raw)) {
-        const bytes = [];
-        raw.replace(/\b([0-9a-f]{8})\b/gi, (_m, word) => {
-            const w = parseInt(word, 16);
-            bytes.push(w & 0xff, (w >>> 8) & 0xff, (w >>> 16) & 0xff, (w >>> 24) & 0xff);
-            return _m;
-        });
-        let run = '';
-        for (let i = 0; i + 1 < bytes.length; i += 2) {
-            const c = bytes[i] | (bytes[i + 1] << 8);
-            if (c >= 48 && c <= 57) {
-                run += String.fromCharCode(c);
-            } else {
-                if (isOtp(run)) {
-                    return run;
-                }
-                run = '';
-            }
-        }
-        return isOtp(run) ? run : null;
-    }
-    const found = raw.match(/\b(\d{6,8})\b/);
-    return found && isOtp(found[1]) ? found[1] : null;
-}
-
-async function unlockClipboard(serial) {
-    if (clipboardUnlocked) {
-        return;
-    }
-    clipboardUnlocked = true;
-    for (const command of [
-        'cmd appops set com.android.shell READ_CLIPBOARD allow',
-        'cmd appops set com.android.shell WRITE_CLIPBOARD allow',
-        'appops set com.android.shell READ_CLIPBOARD allow',
-    ]) {
-        try {
-            await shell(serial, command);
-        } catch (_err) {
-            // Vivo may ignore appops from USB.
-        }
-    }
-}
-
-async function readSearchFieldCode(serial) {
-    const nodes = parseNodes(await dumpUi(serial));
-    const search = nodes.find((node) => idOf(node).endsWith('search_edit_text'));
-    if (search && search.boundsBox) {
-        cachedSearch = search.boundsBox;
-        cachedSearchBottom = search.boundsBox.bottom;
-    }
-    return normalizeTotp(search && search.text);
-}
-
-async function clearSearchField(serial) {
-    const tap = cachedSearch;
-    if (!tap) {
-        return;
-    }
-    await shell(serial, 'input tap ' + tap.x + ' ' + tap.y);
-    await sleep(80);
-    await shell(
-        serial,
-        'input keyevent KEYCODE_MOVE_END; input keyevent 67 67 67 67 67 67 67 67 67 67 67 67',
-    );
-    await shell(serial, 'input tap ' + LIST_SAFE_TAP.x + ' ' + LIST_SAFE_TAP.y);
-    await sleep(100);
-}
-
-async function pasteToReadClipboard(serial) {
-    const tap = cachedSearch;
-    if (!tap) {
-        return null;
-    }
-    await shell(serial, 'input tap ' + tap.x + ' ' + tap.y);
-    await sleep(150);
-    await shell(serial, 'input keyevent KEYCODE_PASTE');
-    await sleep(280);
-    const code = await readSearchFieldCode(serial);
-    await clearSearchField(serial);
-    return code;
-}
-
-async function readClipboardCode(serial) {
-    const commands = [
-        'dumpsys clipboard',
-        'cmd clipboard get',
-        'cmd clipboard get-clip',
-        'service call clipboard 2',
-        'service call clipboard 1',
-        'service call clipboard 2 s16 com.android.shell',
-        'service call clipboard 2 s16 com.fortinet.android.ftm',
-    ];
-    for (const command of commands) {
-        try {
-            const code = digitsFromClipboardText(await shell(serial, command));
-            if (code) {
-                return code;
-            }
-        } catch (_err) {
-            // Some phones block one clipboard command but not the other.
-        }
-    }
-    return null;
-}
-
 function applyCode(match, code) {
     if (!match || !code) {
         return match;
@@ -501,53 +383,6 @@ function applyCode(match, code) {
     match.code = code;
     match.hidden = false;
     return match;
-}
-
-async function tapCodePoint(serial, match) {
-    if (!match || !match.tap) {
-        return;
-    }
-    const x = match.tap.x;
-    const y = match.tap.y;
-    await shellQuiet(serial, 'input tap ' + x + ' ' + y);
-    await sleep(450);
-}
-
-async function readVisibleCode(serial, account) {
-    const latest = pickAccount(await dumpAccounts(serial), account);
-    if (latest && latest.code) {
-        return latest;
-    }
-    return latest || null;
-}
-
-async function captureCodeAfterTap(serial, account, match, previous) {
-    if (match && match.code) {
-        return match;
-    }
-    const copied = await readClipboardCode(serial);
-    if (copied && copied !== previous) {
-        applyCode(match, copied);
-        return match;
-    }
-    const visible = await readVisibleCode(serial, account);
-    if (visible && visible.code && visible.code !== previous) {
-        applyCode(match, visible.code);
-        return match;
-    }
-    await tapCodePoint(serial, match);
-    const again = await readClipboardCode(serial);
-    if (again && again !== previous) {
-        applyCode(match, again);
-    }
-    return match;
-}
-
-async function tapCode(serial, account) {
-    const batch = await dumpAccounts(serial);
-    const match = pickAccount(batch, account);
-    // Do not tap the row â€” that opens the detail/edit screen on this phone.
-    return match ? [match] : batch;
 }
 
 async function leaveSettings(serial) {
@@ -591,26 +426,6 @@ async function findRowOnList(serial, names) {
         await sleep(300);
     }
     return null;
-}
-
-async function revealHiddenWithEye(serial, accounts) {
-    const hidden = (accounts || []).filter((item) => !item.code && item.eye);
-    if (!hidden.length) {
-        return accounts;
-    }
-    for (const item of hidden) {
-        await shellQuiet(serial, 'input tap ' + item.eye.x + ' ' + item.eye.y);
-        await sleep(280);
-        await leaveSettings(serial);
-    }
-    await sleep(700);
-    return dumpAccounts(serial);
-}
-
-async function captureCodeViaClipboard(serial, account, match) {
-    // Clipboard / row taps open the detail or edit screens on this phone.
-    // OCR + centered eye tap are the only safe paths.
-    return match;
 }
 
 function cropBounds(match) {
@@ -1120,9 +935,6 @@ async function tapAndCapture(serial, account, logFn, opts = {}) {
         log('FortiToken debug: skip dash tap (digits already on screen; hint match failed)');
     }
 
-    if (!match.code) {
-        await captureCodeViaClipboard(serial, match.from, match);
-    }
     match.remainingSeconds = totpRemainingSeconds();
     match.body = match.from;
     match.time = match.remainingSeconds + 's left';
@@ -1496,127 +1308,12 @@ async function keepCodesVisible(options = {}) {
     return collectFortiTokenCodes(Object.assign({}, options, { revealOnly: true }));
 }
 
-async function tapRefresh(serial, account) {
-    return tapCode(serial, account);
-}
-
-async function ensureCodesVisible(serial, account) {
-    let peek = await peekFortiToken(serial, account);
-    if (/token_name_row/.test(peek.xml || '')) {
-        await leaveSettings(serial);
-        peek = await peekFortiToken(serial, account);
-    }
-    if (peek.onScreen && digitsAreShowing(peek.match)) {
-        return { match: peek.match, restarted: false, tapped: false, reason: 'showing' };
-    }
-
-    if (!peek.onScreen) {
-        await launchFortiToken(serial);
-        peek = await peekFortiToken(serial, account);
-        if (/name_edittext|Edit name/i.test(peek.xml || '')) {
-            await leaveSettings(serial);
-            peek = await peekFortiToken(serial, account);
-        }
-        if (peek.onScreen && digitsAreShowing(peek.match)) {
-            return { match: peek.match, restarted: false, tapped: false, reason: 'opened' };
-        }
-    }
-
-    const batch = await tapCode(serial, account);
-    return {
-        match: pickAccount(batch, account) || (batch && batch[0]) || null,
-        restarted: false,
-        tapped: true,
-        reason: 'tapped',
-    };
-}
-
-async function readVisibleAccount(serial, account) {
-    const ensured = await ensureCodesVisible(serial, account);
-    return ensured.match;
-}
-
-async function waitForVisibleCodeChange(serial, account, previousCode) {
-    const deadline = Date.now() + 75000;
-    while (Date.now() < deadline) {
-        await sleep(2000);
-        const latest = await readVisibleAccount(serial, account);
-        if (latest && latest.code && latest.code !== previousCode) {
-            return latest;
-        }
-    }
-    throw new Error('FortiToken code did not stay visible or rotate in time. Keep the mahmood token open.');
-}
-
-async function listFortiTokenAccounts(options = {}) {
-    const saved = getConfig();
-    const account = options.account || saved.fortitokenAccount || 'mahmood';
-    const device = await pickDevice(options.serial);
-    await shell(device.serial, 'input keyevent KEYCODE_WAKEUP');
-    const ensured = await ensureCodesVisible(device.serial, account);
-    const accounts = await dumpAccounts(device.serial);
-    const match = ensured.match || pickAccount(accounts, account);
-    return {
-        device,
-        package: FTM_PACKAGE,
-        restarted: ensured.restarted,
-        tapped: ensured.tapped,
-        reason: ensured.reason,
-        match: match
-            ? { from: match.from, hidden: match.hidden, hasCode: Boolean(match.code) }
-            : null,
-        accounts: accounts.map((item) => ({
-            from: item.from,
-            hidden: item.hidden,
-            hasCode: Boolean(item.code) || Boolean(match && match.from === item.from && match.code),
-        })),
-    };
-}
-
-async function getLatestFortiToken(options = {}) {
-    const saved = getConfig();
-    const account = options.account || saved.fortitokenAccount || process.env.SMS_FORTITOKEN_ACCOUNT || 'mahmood';
-    const device = await pickDevice(options.serial);
-    const previous = await readVisibleAccount(device.serial, account);
-    if (!previous) {
-        throw new Error('FortiToken account not visible: ' + account);
-    }
-    if (!previous.code) {
-        throw new Error(
-            'FortiToken token "' +
-                previous.from +
-                '" hid its digits from USB even after tapping the code.',
-        );
-    }
-    const wait = options.waitForChange !== false;
-    const latest = wait ? await waitForVisibleCodeChange(device.serial, account, previous.code) : previous;
-    latest.remainingSeconds = totpRemainingSeconds();
-    latest.body = latest.from + ' code ' + latest.code;
-    latest.time = latest.remainingSeconds + 's left';
-    return {
-        device,
-        package: FTM_PACKAGE,
-        source: 'fortitoken',
-        from: latest.from,
-        time: latest.time,
-        body: latest.body,
-        code: latest.code,
-        remainingSeconds: latest.remainingSeconds,
-        range: 'totp60',
-        conversations: [latest],
-    };
-}
-
 module.exports = {
-    getLatestFortiToken,
-    listFortiTokenAccounts,
     collectFortiTokenCodes,
     keepCodesVisible,
-    openFortiToken,
-    tapRefresh,
+    ensureFortiTokenAlive,
     totpRemainingSeconds,
     waitForFreshWindow,
-    MIN_LEFT_TO_COPY,
     PREFERRED_LEFT_TO_READ,
     MIN_LEFT_TO_POST,
 };

@@ -189,6 +189,7 @@ async function ensureWirelessAdb(logFn) {
     let ready = pickReadyDevice(devices);
     if (ready && isWirelessSerial(ready.serial)) {
         rememberWirelessHost(ready.serial);
+        await releaseUsbDataForCharging(log);
         return ready;
     }
     const usb = (devices || []).find((device) => device.state === 'device' && !isWirelessSerial(device.serial));
@@ -232,19 +233,62 @@ async function ensureWirelessAdb(logFn) {
         }
     }
     devices = await listDevices();
-    return pickReadyDevice(devices);
+    const picked = pickReadyDevice(devices);
+    if (picked && isWirelessSerial(picked.serial)) {
+        await releaseUsbDataForCharging(log);
+    }
+    return picked;
 }
 
-async function ensurePhoneLink(logFn) {
+let lastUsbReleaseAt = 0;
+
+async function releaseUsbDataForCharging(logFn) {
     const log = typeof logFn === 'function' ? logFn : () => {};
-    const devices = await listDevices();
-    const ready = pickReadyDevice(devices);
-    if (ready && isWirelessSerial(ready.serial)) {
-        rememberWirelessHost(ready.serial);
-        return ready;
+    const now = Date.now();
+    if (now - lastUsbReleaseAt < 60000) {
+        return false;
     }
-    const linked = await ensureWirelessAdb(log);
-    return linked || ready;
+    const devices = await listDevices();
+    const wifi = (devices || []).find((device) => device.state === 'device' && isWirelessSerial(device.serial));
+    if (!wifi) {
+        return false;
+    }
+    lastUsbReleaseAt = now;
+    try {
+        // Drop the USB gadget to charge-only. Wi-Fi debugging stays up.
+        await adb(withSerial(['shell', 'svc usb setFunctions'], wifi.serial), { timeoutMs: 8000 });
+    } catch (_err) {
+        // Some clones ignore an empty function list; Device Manager release still charges.
+    }
+    const script = scriptFile('enable-phone-charging.ps1');
+    if (!fs.existsSync(script)) {
+        return false;
+    }
+    try {
+        const { stdout } = await run(
+            'powershell.exe',
+            ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script],
+            { timeoutMs: 20000 },
+        );
+        const text = String(stdout || '');
+        if (/already gone|Disable-PnpDevice ok/i.test(text)) {
+            log(
+                'Released the USB data device so the cable can charge. The agent stays on Wi-Fi debugging.',
+            );
+            return true;
+        }
+        log(
+            'Could not release the USB data device. Remove "I15 Pro Max" from Device Manager so the phone charges. ' +
+                text.trim().split(/\r?\n/).slice(-3).join(' '),
+        );
+    } catch (err) {
+        log(
+            'Could not release the USB data device: ' +
+                String((err && err.message) || err || 'unknown') +
+                '. Remove "I15 Pro Max" from Device Manager so the phone charges.',
+        );
+    }
+    return false;
 }
 
 async function recoverAdb() {
@@ -366,12 +410,11 @@ async function keepPhonePowered(serial) {
     if (!serial) {
         return { charging: false, plugged: false, level: null, usb: false, currentNow: null };
     }
-    const commands = [
-        'svc power stayon usb',
+    for (const command of [
+        'svc power stayon true',
         'settings put global stay_on_while_plugged_in 7',
         'settings put global wifi_sleep_policy 2',
-    ];
-    for (const command of commands) {
+    ]) {
         try {
             await shell(serial, command);
         } catch (_err) {
@@ -388,20 +431,20 @@ async function keepPhonePowered(serial) {
         const raw = Number(await shell(serial, 'cat /sys/class/power_supply/battery/current_now'));
         if (!Number.isNaN(raw)) {
             battery.currentNow = raw;
-            if (raw > 50000) {
-                battery.charging = true;
-            } else if (raw < -50000) {
-                battery.charging = false;
-            }
         }
     } catch (_err) {
         // dumpsys status is enough when sysfs is blocked.
     }
-    if (battery.charging) {
-        try {
-            await shell(serial, 'svc power stayon true');
-        } catch (_err) {
-            // Stay-on-while-plugged is already set.
+    try {
+        const sysStatus = String(await shell(serial, 'cat /sys/class/power_supply/battery/status') || '').trim();
+        if (/^charg/i.test(sysStatus) || /^full/i.test(sysStatus)) {
+            battery.charging = true;
+        }
+    } catch (_err) {
+        // Keep dumpsys charging. MediaTek current_now is negative while charging;
+        // never treat that sign as "not charging".
+        if (battery.status == null && battery.currentNow != null && battery.currentNow < -50000) {
+            battery.charging = true;
         }
     }
     return battery;
@@ -501,18 +544,15 @@ function parseNodes(xml) {
 
 module.exports = {
     adb,
-    adbPath,
-    connectWireless,
     dumpUi,
-    ensurePhoneLink,
     ensureWirelessAdb,
     isWirelessSerial,
     keepPhonePowered,
     listDevices,
     parseNodes,
-    peekPhoneUsb,
     pickReadyDevice,
     recoverAdb,
+    releaseUsbDataForCharging,
     run,
     screencapPng,
     shell,

@@ -125,5 +125,4 @@ async function getLatestRingCentral(options = {}) {
 module.exports = {
     getLatestRingCentral,
     openRingCentral,
-    readRingCentralUi,
 };

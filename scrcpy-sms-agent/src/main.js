@@ -1,12 +1,49 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, shell, dialog } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { getLatestSms, listDevices } = require('./services/sms');
+const { getLatestSms } = require('./services/sms');
 const { startScrcpy } = require('./services/scrcpy');
 const { startWatch } = require('./watch');
+const { listDevices } = require('./lib/adb');
 const { configExample, appRoot } = require('./lib/paths');
 
 const showUi = process.argv.includes('--ui');
+let allowQuit = false;
+
+function confirmCloseAgent(parentWin) {
+    const result = dialog.showMessageBoxSync(parentWin && !parentWin.isDestroyed() ? parentWin : undefined, {
+        type: 'warning',
+        buttons: ['Keep running', 'Close agent'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        title: 'Scrcpy SMS Agent',
+        message: 'Are you sure you want to close this?',
+        detail: 'FortiToken codes will stop posting to HealthForce until the agent is started again.',
+    });
+    return result === 1;
+}
+
+function requestQuit(parentWin) {
+    if (allowQuit) {
+        app.quit();
+        return;
+    }
+    if (confirmCloseAgent(parentWin)) {
+        allowQuit = true;
+        app.quit();
+    }
+}
+
+function guardWindowClose(win) {
+    win.on('close', (event) => {
+        if (allowQuit || showUi) {
+            return;
+        }
+        event.preventDefault();
+        requestQuit(win);
+    });
+}
 
 function packagedAdb() {
     return path.join(process.resourcesPath, 'platform-tools', process.platform === 'win32' ? 'adb.exe' : 'adb');
@@ -109,6 +146,7 @@ if (!app.requestSingleInstanceLock()) {
             return;
         }
         const statusWin = createStatusWindow();
+        guardWindowClose(statusWin);
         const log = (message) => {
             const line = new Date().toISOString() + ' ' + message + '\n';
             try {
@@ -127,7 +165,8 @@ if (!app.requestSingleInstanceLock()) {
                     .catch(() => {});
             }
         };
-        new BrowserWindow({ show: false, skipTaskbar: true, width: 1, height: 1 });
+        const keeper = new BrowserWindow({ show: false, skipTaskbar: true, width: 1, height: 1 });
+        guardWindowClose(keeper);
         startWatch({
             log,
         });
@@ -139,12 +178,24 @@ if (!app.requestSingleInstanceLock()) {
                     { label: 'FortiToken: CC tmalik · CM jjilani · CIS mmehmood', enabled: false },
                     { label: 'Open log', click: () => shell.openPath(logFile) },
                     { type: 'separator' },
-                    { label: 'Quit', click: () => app.quit() },
+                    { label: 'Quit', click: () => requestQuit(statusWin) },
                 ]),
             );
         } catch (_err) {
             // Tray is optional; the hidden window keeps the agent alive.
         }
+    });
+
+    app.on('before-quit', (event) => {
+        if (allowQuit || showUi) {
+            return;
+        }
+        event.preventDefault();
+        requestQuit();
+    });
+
+    app.on('session-end', () => {
+        allowQuit = true;
     });
 
     app.on('window-all-closed', () => {

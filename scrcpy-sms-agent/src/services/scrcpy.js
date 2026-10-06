@@ -89,7 +89,15 @@ async function startScrcpy(serial) {
     if (serial) {
         args.push('-s', serial);
     }
-    args.push('--stay-awake', '--always-on-top');
+    // SDK mouse/keyboard = tap injection (clone phones reject UHID/AOA over Wi-Fi).
+    // Software renderer lets RustDesk/remote mouse clicks hit the mirror window.
+    args.push(
+        '--stay-awake',
+        '--always-on-top',
+        '--mouse=sdk',
+        '--keyboard=sdk',
+        '--render-driver=software',
+    );
     spawn(bin, args, {
         detached: true,
         stdio: 'ignore',
@@ -121,4 +129,4 @@ async function ensureScrcpyRunning(serial, logFn) {
     return true;
 }
 
-module.exports = { findScrcpy, startScrcpy, ensureScrcpyRunning, isScrcpyRunning, lockScrcpyWindow, stopScrcpy };
+module.exports = { startScrcpy, ensureScrcpyRunning, isScrcpyRunning, stopScrcpy };

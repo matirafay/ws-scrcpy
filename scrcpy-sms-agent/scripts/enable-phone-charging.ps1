@@ -1,6 +1,8 @@
 # Requires Administrator.
-# Keep the USB cable plugged for power. Disable USB data so this MediaTek
-# clone can charge. Wi-Fi ADB stays up for the agent.
+# This MediaTek clone will not charge while Windows keeps the USB data
+# device (I15 Pro Max / WinUSB). Removing or disabling that device in
+# Device Manager is what starts charging. The cable stays plugged.
+# Wi-Fi ADB is unaffected. Do not touch the charge-only HID (PID_20FF).
 $ErrorActionPreference = 'Continue'
 $log = Join-Path $PSScriptRoot 'enable-phone-charging.log'
 function Log([string]$message) {
@@ -8,8 +10,6 @@ function Log([string]$message) {
     Write-Output $message
 }
 Set-Content -Path $log -Value ('started ' + (Get-Date).ToString('o') + ' as ' + ([Security.Principal.WindowsIdentity]::GetCurrent().Name))
-$phoneData = 'USB\VID_0E8D&PID_201C\0123456789ABCDEF'
-$phoneCharge = 'USB\VID_0E8D&PID_20FF\0123456789ABCDEF'
 
 Log 'Disabling USB hub power saving...'
 Get-CimInstance -Namespace root\wmi -ClassName MSPower_DeviceEnable |
@@ -24,21 +24,29 @@ Get-CimInstance -Namespace root\wmi -ClassName MSPower_DeviceEnable |
         }
     }
 
-Log 'Disabling USB data on the phone (charge-only)...'
-$pnputilOut = & pnputil.exe /disable-device $phoneData 2>&1 | Out-String
-Log $pnputilOut.Trim()
-try {
-    Disable-PnpDevice -InstanceId $phoneData -Confirm:$false
-    Log '  Disable-PnpDevice ok'
-} catch {
-    Log ('  Disable-PnpDevice: ' + $_.Exception.Message)
+$dataDevices = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {
+        $_.InstanceId -match 'VID_0E8D&PID_201C' -and $_.Status -eq 'OK'
+    })
+if (-not $dataDevices.Count) {
+    Log 'USB data device is already gone, so the cable can charge.'
+    Log 'done'
+    exit 0
 }
 
-Start-Sleep -Seconds 2
-$enableOut = & pnputil.exe /enable-device $phoneCharge 2>&1 | Out-String
-Log ('charge HID: ' + $enableOut.Trim())
+Log 'Removing USB data device so the phone can charge...'
+foreach ($dev in $dataDevices) {
+    Log ('  ' + $dev.FriendlyName + ' | ' + $dev.InstanceId)
+    $removeOut = & pnputil.exe /remove-device $dev.InstanceId /force 2>&1 | Out-String
+    Log $removeOut.Trim()
+}
+$still = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object {
+        $_.InstanceId -match 'VID_0E8D&PID_201C' -and $_.Status -eq 'OK'
+    })
+if (-not $still.Count) {
+    Log 'USB data device is already gone, so the cable can charge.'
+}
 
 Log 'USB devices now:'
-Get-PnpDevice | Where-Object { $_.InstanceId -match 'VID_0E8D' } |
+Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match 'VID_0E8D' } |
     ForEach-Object { Log ('  {0} | {1} | {2}' -f $_.Status, $_.FriendlyName, $_.InstanceId) }
 Log 'done'

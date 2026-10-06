@@ -95,4 +95,4 @@ async function pushSms(sms, options = {}) {
     };
 }
 
-module.exports = { pushSms, mfaPayload };
+module.exports = { pushSms };
