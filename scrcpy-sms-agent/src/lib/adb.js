@@ -411,8 +411,9 @@ async function keepPhonePowered(serial) {
         return { charging: false, plugged: false, level: null, usb: false, currentNow: null };
     }
     for (const command of [
-        'svc power stayon true',
-        'settings put global stay_on_while_plugged_in 7',
+        'svc power stayon false',
+        'settings put global stay_on_while_plugged_in 0',
+        'settings put system screen_off_timeout 15000',
         'settings put global wifi_sleep_policy 2',
     ]) {
         try {

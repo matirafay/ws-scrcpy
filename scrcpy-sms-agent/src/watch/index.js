@@ -222,7 +222,14 @@ function startWatch(options = {}) {
                         chargeLog =
                             'USB is plugged but the phone is NOT charging (' +
                             level +
-                            '). The I15 Pro Max USB data device in Device Manager blocks charging on this phone. Releasing that device so the cable can charge.';
+                            '). Checking Device Manager for the I15 Pro Max data device.';
+                        if (transport === 'wifi') {
+                            releaseUsbDataForCharging(log).catch(() => {});
+                        } else {
+                            log(
+                                'Cannot remove the USB data device yet. Wi-Fi debugging is down, and removing it would disconnect the phone.',
+                            );
+                        }
                     } else {
                         chargeLog =
                             'Phone is NOT charging (' +

@@ -92,7 +92,6 @@ async function startScrcpy(serial) {
     // SDK mouse/keyboard = tap injection (clone phones reject UHID/AOA over Wi-Fi).
     // Software renderer lets RustDesk/remote mouse clicks hit the mirror window.
     args.push(
-        '--stay-awake',
         '--always-on-top',
         '--mouse=sdk',
         '--keyboard=sdk',
