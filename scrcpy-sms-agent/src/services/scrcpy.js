@@ -112,12 +112,19 @@ async function startScrcpy(serial) {
     };
 }
 
+let lastLockAt = 0;
+
 async function ensureScrcpyRunning(serial, logFn) {
     const log = typeof logFn === 'function' ? logFn : () => {};
     if (isScrcpyRunning()) {
-        lockScrcpyWindow();
+        // Re-locking spawns PowerShell; doing it before every read delays the read.
+        if (Date.now() - lastLockAt > 60000) {
+            lastLockAt = Date.now();
+            lockScrcpyWindow();
+        }
         return true;
     }
+    lastLockAt = Date.now();
     log('Phone mirror is not running. Starting it again.');
     const result = await startScrcpy(serial);
     if (!result.ok) {

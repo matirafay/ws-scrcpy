@@ -139,6 +139,7 @@ function startWatch(options = {}) {
     let lastWaitAt = 0;
     let lastRecoverAt = Date.now();
     let lastWifiAttemptAt = 0;
+    let wifiRetryMs = 20000;
     let lastTransportLog = '';
     let lastChargeAt = 0;
     let lastChargeLog = '';
@@ -154,12 +155,19 @@ function startWatch(options = {}) {
         let devices = await listDevices();
         let readyDevice = pickReadyDevice(devices);
         const wifiReady = !!(readyDevice && isWirelessSerial(readyDevice.serial));
-        if (!wifiReady && (!readyDevice || now - lastWifiAttemptAt > 20000)) {
+        if (wifiReady) {
+            wifiRetryMs = 20000;
+        } else if (!readyDevice || now - lastWifiAttemptAt > wifiRetryMs) {
+            const hadUsb = !!readyDevice;
             lastWifiAttemptAt = now;
             const wireless = await ensureWirelessAdb(log);
             if (wireless) {
                 readyDevice = wireless;
             }
+            // Each failed Wi-Fi attempt delays the read by a second or two. While USB
+            // debugging works, try less and less often (up to every 5 minutes).
+            const gotWifi = !!(wireless && isWirelessSerial(wireless.serial));
+            wifiRetryMs = gotWifi || !hadUsb ? 20000 : Math.min(wifiRetryMs * 2, 300000);
         }
         if (!readyDevice) {
             if (!stoppedZombie && isScrcpyRunning()) {

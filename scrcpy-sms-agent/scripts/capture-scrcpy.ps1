@@ -20,6 +20,7 @@ public class ScrcpyCap {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, int nFlags);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
@@ -46,8 +47,11 @@ public class ScrcpyCap {
       int width = Math.Max(0, rect.Right - rect.Left);
       int height = Math.Max(0, rect.Bottom - rect.Top);
       int area = width * height;
-      if (area < 200 * 200) return true;
-      int score = area;
+      // A minimized mirror reports a tiny off-screen rect. Keep it as a
+      // candidate so it can be restored; otherwise every read fails.
+      bool minimized = IsIconic(hWnd);
+      if (!minimized && area < 200 * 200) return true;
+      int score = minimized ? 1 : area;
       if (className.IndexOf("SDL", StringComparison.OrdinalIgnoreCase) >= 0) score += 100000000;
       if (score > bestScore) { bestScore = score; best = hWnd; }
       return true;
@@ -61,8 +65,10 @@ try { [void][ScrcpyCap]::SetProcessDPIAware() } catch { }
 function Get-ScrcpyWindow {
     $hwnd = [ScrcpyCap]::FindVideoWindow()
     if ($hwnd -eq [IntPtr]::Zero) { return $null }
+    $wasMinimized = [ScrcpyCap]::IsIconic($hwnd)
     [void][ScrcpyCap]::ShowWindow($hwnd, 9) # SW_RESTORE
-    Start-Sleep -Milliseconds 120
+    # A window coming back from minimized needs a moment to draw a fresh frame.
+    Start-Sleep -Milliseconds $(if ($wasMinimized) { 700 } else { 120 })
     $rect = New-Object ScrcpyCap+RECT
     [void][ScrcpyCap]::GetWindowRect($hwnd, [ref]$rect)
     $w = [Math]::Max(0, $rect.Right - $rect.Left)

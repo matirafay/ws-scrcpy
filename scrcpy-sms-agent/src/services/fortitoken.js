@@ -4,6 +4,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { adb, dumpUi, keepPhonePowered, listDevices, parseNodes, screencapPng, shell, withSerial } = require('../lib/adb');
 const { scriptFile } = require('../lib/paths');
+const { runInWorker, WorkerUnavailable } = require('../lib/ps-worker');
 
 const FTM_PACKAGE = 'com.fortinet.android.ftm';
 const TOTP_PERIOD_SEC = 30;
@@ -316,11 +317,28 @@ async function launchFortiToken(serial) {
     return { ok: true, package: FTM_PACKAGE, device, restarted: false };
 }
 
+let lastKeepAwakeAt = 0;
+let lastKeepAwakeSerial = '';
+
 async function ensureFortiTokenAlive(serial, logFn) {
     const log = typeof logFn === 'function' ? logFn : () => {};
-    await keepScreenAwake(serial);
+    // This runs before every read. The power settings persist, and a rejected
+    // one costs seconds, so re-apply them once a minute instead of every time.
+    const now = Date.now();
+    if (serial !== lastKeepAwakeSerial || now - lastKeepAwakeAt > 60000) {
+        lastKeepAwakeSerial = serial;
+        lastKeepAwakeAt = now;
+        // Not awaited: on phones that reject these settings it takes seconds.
+        keepScreenAwake(serial).catch(() => {});
+    }
+    await shellQuiet(serial, 'input keyevent KEYCODE_WAKEUP');
+    let focus = await currentFocusLine(serial);
+    if (/OtpTokenListActivity/i.test(focus)) {
+        // Already unlocked on the token list: no unlock swipe needed.
+        return true;
+    }
     await wakeUnlockPhone(serial);
-    const focus = await currentFocusLine(serial);
+    focus = await currentFocusLine(serial);
     if (/OtpTokenListActivity/i.test(focus)) {
         return true;
     }
@@ -454,7 +472,39 @@ function cropBounds(match) {
     return null;
 }
 
-function runOcrScript(imagePath, accountHint, extraArgs) {
+function parseOcrOutput(stdout, extraArgs) {
+    const text = String(stdout || '');
+    const line = text.trim().split(/\r?\n/).filter(Boolean).pop() || '';
+    if (extraArgs && extraArgs.includes('-CountTotp')) {
+        return Number(line) || 0;
+    }
+    if (extraArgs && ['-DumpLines', '-ListHidden', '-Analyze'].some((flag) => extraArgs.includes(flag))) {
+        return text.trim();
+    }
+    return normalizeTotp(line);
+}
+
+async function runOcrScript(imagePath, accountHint, extraArgs) {
+    // Fast path: the shared PowerShell session (about 0.2s instead of 3s).
+    try {
+        const params = { ImagePath: imagePath };
+        if (accountHint) {
+            params.AccountHint = String(accountHint);
+        }
+        (Array.isArray(extraArgs) ? extraArgs : []).forEach((flag) => {
+            params[String(flag).replace(/^-/, '')] = true;
+        });
+        const reply = await runInWorker('ocr-code.ps1', params, 15000);
+        return parseOcrOutput(reply.ok ? reply.out : '', extraArgs);
+    } catch (err) {
+        if (!(err instanceof WorkerUnavailable)) {
+            throw err;
+        }
+    }
+    return runOcrScriptFresh(imagePath, accountHint, extraArgs);
+}
+
+function runOcrScriptFresh(imagePath, accountHint, extraArgs) {
     const script = scriptFile('ocr-code.ps1');
     return new Promise((resolve) => {
         const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-ImagePath', imagePath];
@@ -495,6 +545,33 @@ function runOcrScript(imagePath, accountHint, extraArgs) {
 }
 
 async function captureScrcpyWindowPng(destPath, extraArgs = []) {
+    // Fast path: the shared PowerShell session (about 0.4s instead of 4s).
+    try {
+        const params = { OutPath: destPath };
+        (extraArgs || []).forEach((flag) => {
+            params[String(flag).replace(/^-/, '')] = true;
+        });
+        try {
+            fs.unlinkSync(destPath);
+        } catch (_err) {
+            // no earlier screenshot to clear
+        }
+        const reply = await runInWorker('capture-scrcpy.ps1', params, 15000);
+        let size = 0;
+        try {
+            size = fs.existsSync(destPath) ? fs.statSync(destPath).size : 0;
+        } catch (_err) {
+            size = 0;
+        }
+        if (reply.ok && size >= 8000) {
+            return destPath;
+        }
+        throw new Error((reply.error || 'scrcpy capture failed').trim() + ' bytes=' + size);
+    } catch (err) {
+        if (!(err instanceof WorkerUnavailable)) {
+            throw err;
+        }
+    }
     const script = scriptFile('capture-scrcpy.ps1');
     await new Promise((resolve, reject) => {
         const child = spawn(
@@ -683,7 +760,44 @@ function rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis) {
 }
 
 function emptyOcrAnalysis() {
-    return { totp: 0, codes: { cm: null, cis: null, cc: null }, hidden: [], dump: '' };
+    return { totp: 0, codes: { cm: null, cis: null, cc: null }, hidden: [], labels: null, dump: '' };
+}
+
+// Label -> code pairs from the -Analyze pass. null means the OCR script is an
+// older one that does not report them.
+function parseOcrLabels(raw) {
+    if (raw === undefined || raw === null) {
+        return null;
+    }
+    const list = Array.isArray(raw) ? raw : [raw];
+    return list
+        .map((item) => ({
+            label: String((item && item.label) || '').toLowerCase(),
+            code: normalizeTotp(item && item.code),
+        }))
+        .filter((item) => item.label && item.code && !/^0+$/.test(item.code));
+}
+
+function labelCodeFromAnalysis(analysis, names) {
+    const pairs = (analysis && analysis.labels) || [];
+    for (const name of names) {
+        const norm = String(name || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]/g, '');
+        if (!norm) {
+            continue;
+        }
+        const pair = pairs.find(
+            (item) =>
+                item.label === norm ||
+                item.label.includes(norm) ||
+                (item.label.length >= 6 && norm.includes(item.label)),
+        );
+        if (pair) {
+            return pair.code;
+        }
+    }
+    return null;
 }
 
 function parseOcrAnalysis(raw) {
@@ -711,6 +825,7 @@ function parseOcrAnalysis(raw) {
                 cc: normalizeTotp(codes.cc) || null,
             },
             hidden,
+            labels: parseOcrLabels(parsed.labels),
             dump: String(parsed.dump || '') || (text && start < 0 ? 'NON_JSON ' + text.slice(0, 120) : ''),
         };
     } catch (_err) {
@@ -766,16 +881,21 @@ function applyOcrAnalysis(pending, analysis, logFn, passName) {
     }
 }
 
-// The -Analyze pass only pairs codes for the CM / CIS / CC prefixes. Any other
-// account name (a new target, a test token) is resolved by asking the OCR
-// script for the code under that exact label.
-async function ocrCodeForLabel(imagePath, hint, from) {
+// The -Analyze pass pairs codes by prefix only for CM / CIS / CC. Any other
+// account name (a new target, a test token) is resolved by its exact label:
+// from the same pass when the script reports label pairs, otherwise by asking
+// the OCR script again for that label.
+async function ocrCodeForLabel(imagePath, hint, from, analysis, names) {
     if (hintPrefix(hint) || hintPrefix(from)) {
         return null;
     }
     const labels = [hint, from]
+        .concat(Array.isArray(names) ? names : [])
         .map((item) => String(item || '').trim())
         .filter((item, index, list) => item && list.indexOf(item) === index);
+    if (analysis && Array.isArray(analysis.labels)) {
+        return labelCodeFromAnalysis(analysis, labels);
+    }
     for (const label of labels) {
         const code = await runOcrScript(imagePath, label);
         if (code && /^\d{6,8}$/.test(code) && !/^0+$/.test(code)) {
@@ -785,13 +905,13 @@ async function ocrCodeForLabel(imagePath, hint, from) {
     return null;
 }
 
-async function applyOcrLabels(pending, imagePath, logFn, passName) {
+async function applyOcrLabels(pending, imagePath, logFn, passName, analysis) {
     const log = typeof logFn === 'function' ? logFn : () => {};
     for (const item of pending) {
         if (item.match.code || hintPrefix(item.hint) || hintPrefix(item.match.from)) {
             continue;
         }
-        const code = await ocrCodeForLabel(imagePath, item.hint, item.match.from);
+        const code = await ocrCodeForLabel(imagePath, item.hint, item.match.from, analysis, item.names);
         log(
             'FortiToken debug: ' +
                 passName +
@@ -854,7 +974,7 @@ async function readCodeFromScreenshot(serial, match, names) {
         try {
             await captureScreenPng(serial, full);
             const analysis = await analyzeOcr(full);
-            return prefix ? analysis.codes[prefix] : await ocrCodeForLabel(full, hint, match.from);
+            return prefix ? analysis.codes[prefix] : await ocrCodeForLabel(full, hint, match.from, analysis, names);
         } catch (_err) {
             return null;
         }
@@ -1084,7 +1204,7 @@ async function collectFortiTokenCodes(options = {}) {
             log('FortiToken debug: dashed/hidden rows=' + hiddenPrefixes.join(','));
         }
         applyOcrAnalysis(pending, analysis, log, passName);
-        await applyOcrLabels(pending, shot, log, passName);
+        await applyOcrLabels(pending, shot, log, passName, analysis);
         dropDuplicateOcrCodes(pending, log);
         const looks = ocrLooksLikeFortiToken(analysis);
         if (!looks && !usePhone && !copyFromScreen) {

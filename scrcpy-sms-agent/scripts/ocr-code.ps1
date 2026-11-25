@@ -275,7 +275,8 @@ function DumpLinesText([string[]]$lines) {
         $safe = [regex]::Replace([string]$line, '\d', '#')
         $safe = [regex]::Replace($safe, '[\u0000-\u001F]', ' ')
         $norm = Normalize $line
-        $parts += "L$i norm=$norm safe=$safe"
+        $tall = if ($i -lt $script:lineHeights.Count) { $script:lineHeights[$i] } else { 0 }
+        $parts += "L$i h=$tall norm=$norm safe=$safe"
         $i++
     }
     return ($parts -join ' || ')
@@ -315,6 +316,34 @@ function TotpCount([string[]]$lines) {
     return $codes.Count
 }
 
+function LabelCodePairs([string[]]$lines) {
+    # Every "account label -> code under it" pair, so accounts outside
+    # CM / CIS / CC are resolved in this same pass instead of a second OCR run.
+    # Stricter than the prefix map: the code line must hold exactly six digits
+    # and be clearly taller than its label. The dashes of a hidden code and the
+    # small status-bar numbers are sometimes read as digits; both are short.
+    $heights = @($script:lineHeights)
+    $haveHeights = ($heights.Count -eq $lines.Count)
+    $pairs = @()
+    $owner = -1
+    $ownerUsed = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if (IsAccountLabel $lines[$i]) {
+            $owner = $i
+            $ownerUsed = $false
+            continue
+        }
+        if ($owner -lt 0 -or $ownerUsed -or -not (IsTotpLine $lines[$i])) { continue }
+        if (([regex]::Matches([string]$lines[$i], '\d')).Count -ne 6) { continue }
+        if ($haveHeights -and $heights[$owner] -gt 0 -and $heights[$i] -lt (1.5 * $heights[$owner])) { continue }
+        $code = FirstTotp $lines[$i]
+        if (-not $code) { continue }
+        $pairs += [ordered]@{ label = (Normalize $lines[$owner]); code = [string]$code }
+        $ownerUsed = $true
+    }
+    return $pairs
+}
+
 function AnalyzeText([string[]]$lines) {
     $payload = [ordered]@{
         totp = TotpCount $lines
@@ -324,7 +353,8 @@ function AnalyzeText([string[]]$lines) {
             cc = (ResolveHint $lines 'CC-tmalik')
         }
         hidden = @(HiddenPrefixes $lines)
-        dump = if ($lines -and $lines.Count) { DumpLinesText $lines } else { 'EMPTY_OCR' }
+        labels = @(LabelCodePairs $lines)
+        dump =if ($lines -and $lines.Count) { DumpLinesText $lines } else { 'EMPTY_OCR' }
     }
     return ($payload | ConvertTo-Json -Compress -Depth 4)
 }
@@ -390,11 +420,26 @@ function Save-Inverted([string]$src, [string]$dest) {
     }
 }
 
+function LineHeights($ocrResult) {
+    # Tallest word box per OCR line, in pixels. Digits are tall; the dashes of a
+    # hidden code are thin bars that OCR sometimes turns into digits.
+    return @($ocrResult.Lines | ForEach-Object {
+            $max = 0
+            foreach ($word in $_.Words) {
+                $h = [double]$word.BoundingRect.Height
+                if ($h -gt $max) { $max = $h }
+            }
+            [int][Math]::Round($max)
+        })
+}
+
 $path = (Resolve-Path -LiteralPath $ImagePath).Path
 $lines = @()
+$script:lineHeights = @()
 try {
     $result = RecognizePng $path
     $lines = @($result.Lines | ForEach-Object { $_.Text })
+    $script:lineHeights = @(LineHeights $result)
 } catch {
     $lines = @()
 }
@@ -405,6 +450,7 @@ if (-not $lines -or $lines.Count -eq 0) {
         Save-Inverted $path $inv
         $result = RecognizePng $inv
         $lines = @($result.Lines | ForEach-Object { $_.Text })
+        $script:lineHeights = @(LineHeights $result)
     } catch {
         # Keep the original empty result.
     } finally {
