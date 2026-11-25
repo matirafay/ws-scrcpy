@@ -4,6 +4,7 @@ const { pushSms } = require('../lib/push');
 const { getConfig, configPath } = require('../lib/config');
 const { DEFAULT_TARGETS } = require('../lib/defaults');
 const { ensureScrcpyRunning, isScrcpyRunning, stopScrcpy } = require('../services/scrcpy');
+const { createBatteryLogger, batteryLogPath } = require('../lib/battery-log');
 const fs = require('fs');
 const path = require('path');
 
@@ -140,6 +141,7 @@ function startWatch(options = {}) {
     let pendingReveal = false;
     let pendingRetry = false;
     let hadReadyDevice = false;
+    const batteryLog = createBatteryLogger({ log });
 
     async function tick() {
         const now = Date.now();
@@ -173,6 +175,7 @@ function startWatch(options = {}) {
                 stoppedZombie = false;
             } else {
                 hadReadyDevice = false;
+                batteryLog.noDevice(devices.map((device) => device.state).join(',') || 'not listed');
                 const message = await usbWaitMessage(devices);
                 if (message !== lastWaitLog || now - lastWaitAt > 20000) {
                     lastWaitLog = message;
@@ -209,6 +212,7 @@ function startWatch(options = {}) {
             lastChargeAt = now;
             powerBusy = true;
             const serial = readyDevice.serial;
+            batteryLog.sample(serial, transport).catch(() => {});
             keepPhonePowered(serial)
                 .then((battery) => {
                     const level = battery.level != null ? battery.level + '%' : 'unknown';
@@ -396,6 +400,7 @@ function startWatch(options = {}) {
 
     log('Posting to ' + getConfig().url);
     log('Config ' + configPath());
+    log('Battery log ' + batteryLogPath());
     log('Policy: Wi-Fi debugging first, USB debugging fallback.');
     log('Policy: USB cable stays connected for charging so the phone does not turn off or shut down.');
     log('Policy: keep FortiToken in front with codes visible; post CC/CM/CIS at the start of each 30s window.');
