@@ -670,10 +670,7 @@ function rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis) {
         return false;
     }
     const prefix = hintPrefix(item.hint) || hintPrefix(item.match && item.match.from);
-    if (!prefix) {
-        return false;
-    }
-    if (hiddenPrefixes && hiddenPrefixes.includes(prefix)) {
+    if (prefix && hiddenPrefixes && hiddenPrefixes.includes(prefix)) {
         return true;
     }
     // Token list is on screen but this row has no digits — tap its dash band.
@@ -764,6 +761,48 @@ function applyOcrAnalysis(pending, analysis, logFn, passName) {
     }
 }
 
+// The -Analyze pass only pairs codes for the CM / CIS / CC prefixes. Any other
+// account name (a new target, a test token) is resolved by asking the OCR
+// script for the code under that exact label.
+async function ocrCodeForLabel(imagePath, hint, from) {
+    if (hintPrefix(hint) || hintPrefix(from)) {
+        return null;
+    }
+    const labels = [hint, from]
+        .map((item) => String(item || '').trim())
+        .filter((item, index, list) => item && list.indexOf(item) === index);
+    for (const label of labels) {
+        const code = await runOcrScript(imagePath, label);
+        if (code && /^\d{6,8}$/.test(code) && !/^0+$/.test(code)) {
+            return code;
+        }
+    }
+    return null;
+}
+
+async function applyOcrLabels(pending, imagePath, logFn, passName) {
+    const log = typeof logFn === 'function' ? logFn : () => {};
+    for (const item of pending) {
+        if (item.match.code || hintPrefix(item.hint) || hintPrefix(item.match.from)) {
+            continue;
+        }
+        const code = await ocrCodeForLabel(imagePath, item.hint, item.match.from);
+        log(
+            'FortiToken debug: ' +
+                passName +
+                ' OCR label="' +
+                item.hint +
+                '" hit=' +
+                Boolean(code) +
+                ' len=' +
+                (code ? String(code).length : 0),
+        );
+        if (code) {
+            applyCode(item.match, code);
+        }
+    }
+}
+
 async function captureScreenPng(serial, destPath) {
     let lastErr = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -809,7 +848,7 @@ async function readCodeFromScreenshot(serial, match, names) {
         try {
             await captureScreenPng(serial, full);
             const analysis = await analyzeOcr(full);
-            return prefix ? analysis.codes[prefix] : null;
+            return prefix ? analysis.codes[prefix] : await ocrCodeForLabel(full, hint, match.from);
         } catch (_err) {
             return null;
         }
@@ -1038,6 +1077,7 @@ async function collectFortiTokenCodes(options = {}) {
             log('FortiToken debug: dashed/hidden rows=' + hiddenPrefixes.join(','));
         }
         applyOcrAnalysis(pending, analysis, log, passName);
+        await applyOcrLabels(pending, shot, log, passName);
         dropDuplicateOcrCodes(pending, log);
         const looks = ocrLooksLikeFortiToken(analysis);
         if (!looks && !usePhone && !copyFromScreen) {
@@ -1255,7 +1295,8 @@ async function collectFortiTokenCodes(options = {}) {
             await waitForFreshWindow(PREFERRED_LEFT_TO_READ);
         }
         if (!match.code) {
-            const alreadyTapped = Boolean(prefix && eyesTapped.has(prefix));
+            const tapKey = eyeKey(item);
+            const alreadyTapped = Boolean(tapKey && eyesTapped.has(tapKey));
             const allowEye = dashed && Boolean(match && match.eye) && !alreadyTapped;
             log(
                 'FortiToken debug: fallback tapAndCapture hint="' +
@@ -1271,8 +1312,8 @@ async function collectFortiTokenCodes(options = {}) {
             );
             if (captured) {
                 match = captured;
-                if (allowEye && prefix) {
-                    eyesTapped.add(prefix);
+                if (allowEye && tapKey) {
+                    eyesTapped.add(tapKey);
                 }
             }
         }
