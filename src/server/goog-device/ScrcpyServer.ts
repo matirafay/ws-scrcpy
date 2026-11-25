@@ -97,7 +97,9 @@ export class ScrcpyServer {
                                 `Found old server version running (PID: ${pid}, Version: ${versionString})`,
                             );
                             console.log(device.TAG, 'Perform kill now');
-                            device.killProcess(pid);
+                            device.killProcess(pid).catch((e: Error) => {
+                                console.error(device.TAG, `Failed to kill PID ${pid}: ${e.message}`);
+                            });
                         }
                     }
                 }

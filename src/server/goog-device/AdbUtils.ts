@@ -57,7 +57,7 @@ export class AdbUtils {
                 pathString += '/';
             }
             try {
-                stats = await this.stats(serial, pathString, stats, deep++);
+                stats = await this.stats(serial, pathString, stats, deep + 1);
             } catch (error: any) {
                 if (error.message === 'Too deep') {
                     if (deep === 0) {

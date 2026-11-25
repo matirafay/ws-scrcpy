@@ -3,8 +3,13 @@ import Util from '../../app/Util';
 import { CloseEventClass } from './CloseEventClass';
 
 export class Message {
+    private static readonly HEADER_LENGTH = 5; // type (1) + channelId (4)
+
     public static parse(buffer: ArrayBuffer): Message {
         const view = Buffer.from(buffer);
+        if (view.byteLength < Message.HEADER_LENGTH) {
+            throw new Error(`Invalid message. Too short (${view.byteLength})`);
+        }
 
         const type: MessageType = view.readUInt8(0);
         const channelId = view.readUInt32LE(1);
@@ -43,7 +48,7 @@ export class Message {
     public toCloseEvent(): CloseEvent {
         let code: number | undefined;
         let reason: string | undefined;
-        if (this.data && this.data.byteLength) {
+        if (this.data && this.data.byteLength >= 2) {
             const buffer = Buffer.from(this.data);
             code = buffer.readUInt16LE(0);
             if (buffer.byteLength > 6) {

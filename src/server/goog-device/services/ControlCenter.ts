@@ -14,6 +14,7 @@ import { DeviceState } from '../../../common/DeviceState';
 
 export class ControlCenter extends BaseControlCenter<GoogDeviceDescriptor> implements Service {
     private static readonly defaultWaitAfterError = 1000;
+    private static readonly maxWaitAfterError = 30000;
     private static instance?: ControlCenter;
 
     private initialized = false;
@@ -48,9 +49,13 @@ export class ControlCenter extends BaseControlCenter<GoogDeviceDescriptor> imple
         }
         console.log(`Device tracker is down. Will try to restart in ${this.waitAfterError}ms`);
         this.restartTimeoutId = setTimeout(() => {
+            this.restartTimeoutId = undefined;
             this.stopTracker();
-            this.waitAfterError *= 1.2;
-            this.init();
+            this.waitAfterError = Math.min(this.waitAfterError * 1.2, ControlCenter.maxWaitAfterError);
+            this.init().catch((e: Error) => {
+                console.error(`Error: Failed to restart "${this.getName()}". ${e.message}`);
+                this.restartTracker();
+            });
         }, this.waitAfterError);
     };
 
@@ -148,6 +153,7 @@ export class ControlCenter extends BaseControlCenter<GoogDeviceDescriptor> imple
     public start(): Promise<void> {
         return this.init().catch((e) => {
             console.error(`Error: Failed to init "${this.getName()}". ${e.message}`);
+            this.restartTracker();
         });
     }
 

@@ -11,22 +11,28 @@ export class ExtendedClient extends Client {
 
     public async pipeReadDir(serial: string, pathString: string, stream: Multiplexer): Promise<void> {
         const sync = await this.pipeSyncService(serial);
-        return sync.pipeReadDir(pathString, stream).then(() => {
+        try {
+            await sync.pipeReadDir(pathString, stream);
+        } finally {
             sync.end();
-        });
+        }
     }
 
     public async pipePull(serial: string, path: string, stream: Multiplexer): Promise<void> {
         const sync = await this.pipeSyncService(serial);
-        return sync.pipePull(path, stream).then(() => {
+        try {
+            await sync.pipePull(path, stream);
+        } finally {
             sync.end();
-        });
+        }
     }
 
     public async pipeStat(serial: string, path: string, stream: Multiplexer): Promise<void> {
         const sync = await this.pipeSyncService(serial);
-        return sync.pipeStat(path, stream).then(() => {
+        try {
+            await sync.pipeStat(path, stream);
+        } finally {
             sync.end();
-        });
+        }
     }
 }

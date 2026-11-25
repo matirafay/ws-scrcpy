@@ -17,7 +17,7 @@ export class WebsocketProxy extends Mw {
         }
         const wsString = url.searchParams.get('ws');
         if (!wsString) {
-            ws.close(4003, `[${this.TAG}] Invalid value "${ws}" for "ws" parameter`);
+            ws.close(4003, `[${this.TAG}] Invalid value "${wsString}" for "ws" parameter`);
             return;
         }
         return this.createProxy(ws, wsString);

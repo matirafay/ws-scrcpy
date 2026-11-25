@@ -62,7 +62,8 @@ export class WebsocketMultiplexer extends Mw {
                     // channel.addEventListener('close', remove);
                     // channel.addEventListener('error', remove);
                 }
-            } finally {
+            } catch (error: any) {
+                console.error(`[${WebsocketMultiplexer.TAG}] Failed to process channel: ${error?.message}`);
             }
         }
         if (!processed) {

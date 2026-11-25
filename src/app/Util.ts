@@ -10,7 +10,8 @@ export default class Util {
 
     public static filterTrailingZeroes(bytes: Uint8Array): Uint8Array {
         let b = 0;
-        return bytes
+        // `reverse()` works in place, copy first to not corrupt the caller's buffer
+        return Uint8Array.from(bytes)
             .reverse()
             .filter((i) => b || (b = i))
             .reverse();
@@ -18,7 +19,8 @@ export default class Util {
 
     public static prettyBytes(value: number): string {
         let suffix = 0;
-        while (value >= 512) {
+        const maxSuffix = Object.keys(Util.SUFFIX).length - 1;
+        while (value >= 512 && suffix < maxSuffix) {
             suffix++;
             value /= 1024;
         }

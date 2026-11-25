@@ -139,7 +139,7 @@ export class Config {
     }
 
     public get announceLocalGoogTracker(): boolean {
-        return this.fullConfig.runGoogTracker;
+        return this.fullConfig.announceGoogTracker;
     }
 
     public get runLocalApplTracker(): boolean {
@@ -147,7 +147,7 @@ export class Config {
     }
 
     public get announceLocalApplTracker(): boolean {
-        return this.fullConfig.runApplTracker;
+        return this.fullConfig.announceApplTracker;
     }
 
     public get servers(): ServerItem[] {

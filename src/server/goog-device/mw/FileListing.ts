@@ -51,6 +51,11 @@ export class FileListing extends Mw {
             case Protocol.LIST:
             case Protocol.STAT:
             case Protocol.RECV:
+                if (data.length < offset + 4) {
+                    console.error(`[${FileListing.TAG}]`, `Invalid message. Too short (${data.length})`);
+                    channel.close(4001, `Invalid message. Too short (${data.length})`);
+                    return;
+                }
                 const length = data.readUInt32LE(offset);
                 offset += 4;
                 const pathBuffer = data.slice(offset, offset + length);

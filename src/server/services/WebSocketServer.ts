@@ -37,7 +37,13 @@ export class WebSocketServer implements Service {
                 ws.close(4001, `[${TAG}] Invalid url`);
                 return;
             }
-            const url = new URL(request.url, 'https://example.org/');
+            let url: URL;
+            try {
+                url = new URL(request.url, 'https://example.org/');
+            } catch (error: any) {
+                ws.close(4001, `[${TAG}] Invalid url`);
+                return;
+            }
             const action = url.searchParams.get('action') || '';
             let processed = false;
             for (const mwFactory of this.mwFactories.values()) {

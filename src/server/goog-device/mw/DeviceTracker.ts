@@ -14,6 +14,7 @@ export class DeviceTracker extends Mw {
     public static readonly type = 'android';
     private adt: ControlCenter = ControlCenter.getInstance();
     private readonly id: string;
+    private released = false;
 
     public static processChannel(ws: Multiplexer, code: string): Mw | undefined {
         if (code !== ChannelCode.GTRC) {
@@ -36,6 +37,9 @@ export class DeviceTracker extends Mw {
         this.adt
             .init()
             .then(() => {
+                if (this.released) {
+                    return;
+                }
                 this.adt.on('device', this.sendDeviceMessage);
                 this.buildAndSendMessage(this.adt.getDevices());
             })
@@ -84,6 +88,7 @@ export class DeviceTracker extends Mw {
     }
 
     public release(): void {
+        this.released = true;
         super.release();
         this.adt.off('device', this.sendDeviceMessage);
     }

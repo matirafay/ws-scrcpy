@@ -38,7 +38,7 @@ export class Multiplexer extends TypedEmitter<MultiplexerEvents> implements WebS
     public readyState: number;
     private channels: Map<number, { channel: Multiplexer; emitter: WebsocketEventEmitter }> = new Map();
     private nextId = 0;
-    private maxId = 4294967296;
+    private maxId = 4294967295; // ids are written with writeUInt32LE (see Message.createBuffer)
     private storage: Array<string | ArrayBufferLike | Blob | ArrayBufferView> = [];
     private readonly messageEmitter: WebsocketEventEmitter;
     private emptyTimerScheduled = false;
@@ -81,7 +81,13 @@ export class Multiplexer extends TypedEmitter<MultiplexerEvents> implements WebS
 
         const onMessageHandler = (event: MessageEvent) => {
             const { data } = event;
-            const message = Message.parse(data);
+            let message: Message;
+            try {
+                message = Message.parse(data);
+            } catch (error: any) {
+                this.dispatchEvent(new ErrorEventClass('error', { error }));
+                return;
+            }
             switch (message.type) {
                 case MessageType.CreateChannel: {
                     const { channelId, data } = message;
@@ -320,16 +326,18 @@ export class Multiplexer extends TypedEmitter<MultiplexerEvents> implements WebS
 
     private getNextId(): number {
         let hitTop = false;
-        while (this.channels.has(++this.nextId)) {
-            if (this.nextId === this.maxId) {
+        for (;;) {
+            if (this.nextId >= this.maxId) {
                 if (hitTop) {
                     throw Error('No available id');
                 }
                 this.nextId = 0;
                 hitTop = true;
             }
+            if (!this.channels.has(++this.nextId)) {
+                return this.nextId;
+            }
         }
-        return this.nextId;
     }
 
     public dispatchEvent(event: Event): boolean {

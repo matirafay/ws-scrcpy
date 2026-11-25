@@ -16,7 +16,7 @@ enum State {
 
 export class FilePushReader {
     private static fileId = 1;
-    private static maxId = 4294967295; // 2^32 - 1
+    private static maxId = 32767; // ids are sent as signed 16-bit integers (see createResponse)
 
     public static handle(serial: string, channel: WebSocket): FilePushReader {
         return new FilePushReader(serial, channel);
@@ -75,7 +75,13 @@ export class FilePushReader {
     }
 
     private onMessage = async (event: MessageEvent): Promise<void> => {
-        const command = CommandControlMessage.pushFileCommandFromBuffer(Buffer.from(event.data));
+        let command: ReturnType<typeof CommandControlMessage.pushFileCommandFromBuffer>;
+        try {
+            command = CommandControlMessage.pushFileCommandFromBuffer(Buffer.from(event.data));
+        } catch (error: any) {
+            this.closeWithError(FilePushResponseStatus.ERROR_OTHER, `Invalid message: ${error?.message}`);
+            return;
+        }
 
         const { id, state } = command;
         switch (state) {
@@ -122,7 +128,12 @@ export class FilePushReader {
                 if (this.state === State.START) {
                     const promise = this.createStream(chunk);
                     this.createStreamPromiseMap.set(id, promise);
-                    await promise;
+                    try {
+                        await promise;
+                    } catch (error: any) {
+                        this.closeWithError(FilePushResponseStatus.ERROR_OTHER, error?.message);
+                        return;
+                    }
                     this.createStreamPromiseMap.delete(id);
                     this.state = State.APPEND;
                     return;
@@ -138,7 +149,12 @@ export class FilePushReader {
                 }
                 const promise = this.createStreamPromiseMap.get(id);
                 if (promise) {
-                    await promise;
+                    try {
+                        await promise;
+                    } catch (error: any) {
+                        // The APPEND handler already reported this failure and closed the channel
+                        return;
+                    }
                 }
                 if (this.state !== State.APPEND) {
                     this.closeWithError(FilePushResponseStatus.ERROR_INVALID_STATE);
