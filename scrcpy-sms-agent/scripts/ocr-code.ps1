@@ -328,15 +328,22 @@ function LabelCodePairs([string[]]$lines) {
     $owner = -1
     $ownerUsed = $false
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if (IsAccountLabel $lines[$i]) {
+        $text = [string]$lines[$i]
+        # Zeros are sometimes read as the letter O ("169 ooo" for 169 000). Only
+        # a line shaped exactly like a code (3 + 3 of digits and O's, with at
+        # least one real digit) is repaired, and it still has to pass the
+        # height check below.
+        $shapedLikeCode = ($text -match '^\s*[0-9Oo]{3}\s*[0-9Oo]{3}\s*$') -and ($text -match '\d')
+        if ($shapedLikeCode) { $text = ($text -replace '[Oo]', '0') }
+        if (-not $shapedLikeCode -and (IsAccountLabel $lines[$i])) {
             $owner = $i
             $ownerUsed = $false
             continue
         }
-        if ($owner -lt 0 -or $ownerUsed -or -not (IsTotpLine $lines[$i])) { continue }
-        if (([regex]::Matches([string]$lines[$i], '\d')).Count -ne 6) { continue }
+        if ($owner -lt 0 -or $ownerUsed -or -not (IsTotpLine $text)) { continue }
+        if (([regex]::Matches($text, '\d')).Count -ne 6) { continue }
         if ($haveHeights -and $heights[$owner] -gt 0 -and $heights[$i] -lt (1.5 * $heights[$owner])) { continue }
-        $code = FirstTotp $lines[$i]
+        $code = FirstTotp $text
         if (-not $code) { continue }
         $pairs += [ordered]@{ label = (Normalize $lines[$owner]); code = [string]$code }
         $ownerUsed = $true
