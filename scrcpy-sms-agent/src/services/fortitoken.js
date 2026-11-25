@@ -376,12 +376,17 @@ async function peekFortiToken(serial, account) {
     };
 }
 
-function applyCode(match, code) {
+// When the screenshot behind the most recent OCR pass was started. OCR takes a
+// few seconds, so a code can be read in one 30s window and handed over in the next.
+let lastShotAt = 0;
+
+function applyCode(match, code, capturedAt) {
     if (!match || !code) {
         return match;
     }
     match.code = code;
     match.hidden = false;
+    match.capturedAt = capturedAt || Date.now();
     return match;
 }
 
@@ -756,7 +761,7 @@ function applyOcrAnalysis(pending, analysis, logFn, passName) {
                 (ocrCode ? String(ocrCode).length : 0),
         );
         if (ocrCode) {
-            applyCode(item.match, ocrCode);
+            applyCode(item.match, ocrCode, lastShotAt);
         }
     }
 }
@@ -798,7 +803,7 @@ async function applyOcrLabels(pending, imagePath, logFn, passName) {
                 (code ? String(code).length : 0),
         );
         if (code) {
-            applyCode(item.match, code);
+            applyCode(item.match, code, lastShotAt);
         }
     }
 }
@@ -807,6 +812,7 @@ async function captureScreenPng(serial, destPath) {
     let lastErr = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
+            lastShotAt = Date.now();
             try {
                 await captureScrcpyWindowPng(destPath);
             } catch (err) {
@@ -901,7 +907,7 @@ async function tapAndCapture(serial, account, logFn, opts = {}) {
                 (ocrCode ? String(ocrCode).length : 0),
         );
         if (ocrCode) {
-            applyCode(match, ocrCode);
+            applyCode(match, ocrCode, lastShotAt);
         }
     }
 
@@ -917,7 +923,7 @@ async function tapAndCapture(serial, account, logFn, opts = {}) {
                 (retry ? String(retry).length : 0),
         );
         if (retry) {
-            applyCode(match, retry);
+            applyCode(match, retry, lastShotAt);
         }
     }
 
@@ -967,7 +973,7 @@ async function tapAndCapture(serial, account, logFn, opts = {}) {
                     (ocrAfterEye ? String(ocrAfterEye).length : 0),
             );
             if (ocrAfterEye) {
-                applyCode(match, ocrAfterEye);
+                applyCode(match, ocrAfterEye, lastShotAt);
             }
         }
     } else if (!match.code && !allowEye) {
@@ -1046,6 +1052,7 @@ async function collectFortiTokenCodes(options = {}) {
         // window first; PrintWindow avoids Cursor overlapping the pixels.
         const usePhone = Boolean(opts.phone);
         const copyFromScreen = Boolean(opts.copyFromScreen);
+        lastShotAt = Date.now();
         if (usePhone) {
             await screencapPng(device.serial, shot);
         } else if (copyFromScreen) {

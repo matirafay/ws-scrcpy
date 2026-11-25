@@ -79,6 +79,12 @@ async function pushNewCode(sms, state, log, target) {
             's. ' +
             (enough ? 'Enough to send to the endpoint.' : 'Not enough to send. ' + waitMessage(left)),
     );
+    // Reading takes a few seconds. Digits captured before the window rolled over
+    // have already expired, however much time the new window has left.
+    if (sms.capturedAt && Math.floor(sms.capturedAt / 1000 / 30) !== windowId) {
+        log('Digits for "' + target.title + '" were read in the previous 30s window. Reading the new ones.');
+        return 'stale';
+    }
     if (state.lastSent[key] === sms.code) {
         if (!state.lastSentAt[key] || ageMs < 28000) {
             log('Already posted "' + target.title + '" this window. ' + waitMessage(left));
