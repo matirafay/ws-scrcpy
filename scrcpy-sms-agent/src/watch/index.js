@@ -148,7 +148,7 @@ function startWatch(options = {}) {
     let pendingReveal = false;
     let pendingRetry = false;
     let hadReadyDevice = false;
-    const batteryLog = createBatteryLogger({ log });
+    const batteryLog = createBatteryLogger({ log, onSample: options.onBattery });
 
     async function tick() {
         const now = Date.now();

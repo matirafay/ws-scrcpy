@@ -108,6 +108,12 @@ function describe(snapshot) {
     if (snapshot.temperature != null) {
         parts.push((snapshot.temperature / 10).toFixed(1) + 'C');
     }
+    // Raw value from the phone. The sign differs by vendor (negative means
+    // charging on OPPO/realme and MediaTek), so it is shown as reported.
+    const current = snapshot.batteryCurrent != null ? snapshot.batteryCurrent : snapshot.sysfs.current_now;
+    if (current !== undefined && current !== null && current !== '') {
+        parts.push('current ' + current);
+    }
     ['charge_timeout', 'notify_code', 'mmi_charging_enable', 'input_suspend', 'charging_enabled'].forEach((name) => {
         if (snapshot.sysfs[name] !== undefined) {
             parts.push(name + '=' + snapshot.sysfs[name]);
@@ -126,6 +132,7 @@ function createBatteryLogger(options = {}) {
     const write = options.write || appendBatteryLog;
     const clock = options.now || Date.now;
     const everyMs = options.everyMs || SAMPLE_EVERY_MS;
+    const onSample = typeof options.onSample === 'function' ? options.onSample : null;
 
     let lastKey = '';
     let lastWriteAt = 0;
@@ -200,6 +207,13 @@ function createBatteryLogger(options = {}) {
                     snapshot,
                 ),
             );
+            if (onSample) {
+                try {
+                    onSample(snapshot, describe(snapshot));
+                } catch (_err) {
+                    // A display problem must never stop the watch loop.
+                }
+            }
         }
         lastKey = key;
         return snapshot;

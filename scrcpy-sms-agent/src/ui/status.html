@@ -4,8 +4,11 @@
   <meta charset="utf-8" />
   <title>Scrcpy SMS Agent</title>
   <style>
+    html, body { height: 100%; }
     body {
       margin: 0;
+      display: flex;
+      flex-direction: column;
       font: 13px/1.45 Segoe UI, sans-serif;
       background: #111318;
       color: #e8eaed;
@@ -19,10 +22,45 @@
       font-size: 15px;
     }
     p { margin: 0; color: #9aa0a6; }
+    nav {
+      display: flex;
+      gap: 4px;
+      padding: 8px 12px 0;
+      border-bottom: 1px solid #2a2f3a;
+    }
+    nav button {
+      padding: 6px 14px;
+      font: inherit;
+      color: #9aa0a6;
+      background: transparent;
+      border: 1px solid transparent;
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      cursor: pointer;
+    }
+    nav button:hover { color: #e8eaed; }
+    nav button.active {
+      color: #e8eaed;
+      background: #1b1f27;
+      border-color: #2a2f3a;
+    }
+    .pane {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .pane[hidden] { display: none; }
+    #battery-now {
+      padding: 10px 16px;
+      border-bottom: 1px solid #2a2f3a;
+      background: #1b1f27;
+    }
     pre {
+      flex: 1;
+      min-height: 0;
       margin: 0;
       padding: 12px 16px;
-      height: calc(100vh - 76px);
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
@@ -34,6 +72,51 @@
     <h1>FortiToken agent</h1>
     <p>Wi-Fi ADB first, USB ADB fallback. USB cable stays connected for charging so the phone cannot shut down. FortiToken stays unlocked with codes visible.</p>
   </header>
-  <pre id="log">Starting...</pre>
+  <nav>
+    <button id="tab-agent" class="active" data-pane="pane-agent">Agent</button>
+    <button id="tab-battery" data-pane="pane-battery">Battery</button>
+  </nav>
+  <div id="pane-agent" class="pane">
+    <pre id="log">Starting...</pre>
+  </div>
+  <div id="pane-battery" class="pane" hidden>
+    <div id="battery-now">No battery reading yet.</div>
+    <pre id="battery"></pre>
+  </div>
+  <script>
+    // Newest line first. Capped so a window left open for days stays fast.
+    var MAX_LINES = 600;
+
+    function prepend(id, message) {
+      var el = document.getElementById(id);
+      if (!el) {
+        return;
+      }
+      var lines = (String(message) + '\n' + el.textContent).split('\n');
+      if (lines.length > MAX_LINES) {
+        lines.length = MAX_LINES;
+      }
+      el.textContent = lines.join('\n');
+    }
+
+    window.agentLog = function (message) {
+      prepend('log', message);
+    };
+    window.batteryLog = function (message) {
+      prepend('battery', message);
+    };
+    window.batteryNow = function (message) {
+      document.getElementById('battery-now').textContent = String(message);
+    };
+
+    Array.prototype.forEach.call(document.querySelectorAll('nav button'), function (button) {
+      button.addEventListener('click', function () {
+        Array.prototype.forEach.call(document.querySelectorAll('nav button'), function (other) {
+          other.classList.toggle('active', other === button);
+          document.getElementById(other.dataset.pane).hidden = other !== button;
+        });
+      });
+    });
+  </script>
 </body>
 </html>

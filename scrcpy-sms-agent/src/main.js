@@ -8,6 +8,10 @@ const { listDevices } = require('./lib/adb');
 const { configExample, appRoot } = require('./lib/paths');
 
 const showUi = process.argv.includes('--ui');
+
+// Log lines about power and charging go to the status window's Battery tab.
+const BATTERY_MESSAGE =
+    /^(Battery: |Battery log |Phone is (NOT )?charging|USB is plugged but the phone is NOT charging|Released the USB data device|Could not release the USB data device|Cannot remove the USB data device)/;
 let allowQuit = false;
 
 function confirmCloseAgent(parentWin) {
@@ -147,6 +151,18 @@ if (!app.requestSingleInstanceLock()) {
         }
         const statusWin = createStatusWindow();
         guardWindowClose(statusWin);
+        const clockTime = () => new Date().toLocaleTimeString('en-GB');
+        // Calls one of the page's functions: agentLog, batteryLog or batteryNow.
+        const toStatus = (fn, message) => {
+            if (!statusWin || statusWin.isDestroyed()) {
+                return;
+            }
+            statusWin.webContents
+                .executeJavaScript(
+                    'window.' + fn + ' && window.' + fn + '(' + JSON.stringify(String(message)) + ')',
+                )
+                .catch(() => {});
+        };
         const log = (message) => {
             const line = new Date().toISOString() + ' ' + message + '\n';
             try {
@@ -155,20 +171,21 @@ if (!app.requestSingleInstanceLock()) {
                 // Keep the agent running even if the log file cannot be written.
             }
             console.log('[sms-agent]', message);
-            if (statusWin && !statusWin.isDestroyed()) {
-                statusWin.webContents
-                    .executeJavaScript(
-                        'var el=document.getElementById("log"); if(el){ el.textContent = ' +
-                            JSON.stringify(message) +
-                            ' + "\\n" + el.textContent; }',
-                    )
-                    .catch(() => {});
+            if (BATTERY_MESSAGE.test(message)) {
+                toStatus('batteryLog', clockTime() + '  ' + message);
+            } else {
+                toStatus('agentLog', message);
             }
         };
         const keeper = new BrowserWindow({ show: false, skipTaskbar: true, width: 1, height: 1 });
         guardWindowClose(keeper);
         startWatch({
             log,
+            onBattery: (_snapshot, summary) => {
+                const line = clockTime() + '  ' + summary;
+                toStatus('batteryNow', line);
+                toStatus('batteryLog', line);
+            },
         });
         try {
             const tray = new Tray(process.execPath);
