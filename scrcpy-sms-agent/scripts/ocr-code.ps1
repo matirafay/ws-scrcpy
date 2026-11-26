@@ -345,22 +345,204 @@ function LabelCodePairs([string[]]$lines) {
         if ($haveHeights -and $heights[$owner] -gt 0 -and $heights[$i] -lt (1.5 * $heights[$owner])) { continue }
         $code = FirstTotp $text
         if (-not $code) { continue }
-        $pairs += [ordered]@{ label = (Normalize $lines[$owner]); code = [string]$code }
+        $pairs += [ordered]@{ label = (Normalize $lines[$owner]); code = [string]$code; index = $owner }
         $ownerUsed = $true
     }
     return $pairs
 }
 
-function AnalyzeText([string[]]$lines) {
-    $payload = [ordered]@{
-        totp = TotpCount $lines
-        codes = [ordered]@{
-            cm = (ResolveHint $lines 'CM-jjilani')
-            cis = (ResolveHint $lines 'CIS-mmehmood')
-            cc = (ResolveHint $lines 'CC-tmalik')
+function CodeShaped([string]$text) {
+    # "123 456", allowing zeros read as the letter O. '' when it is not a code.
+    if (-not (($text -match '^\s*[0-9Oo]{3}\s*[0-9Oo]{3}\s*$') -and ($text -match '\d'))) { return '' }
+    return (($text -replace '[Oo]', '0') -replace '\s', '')
+}
+
+# Windows OCR sometimes drops half or all of a code that is plainly on screen
+# (seen with codes containing 4s: only "397" read of "397 484"). The same row
+# read at another size usually comes out whole, but a single re-read can also
+# misread a digit (5 as 6). So the row is read at several sizes and a code
+# counts only when two of those reads agree and none of them disagrees.
+# "Row" reads just the strip under the label; the others read the whole picture.
+# Ordered by how often each one recovered a dropped code in testing.
+$script:rescueVariants = @(
+    @{ Name = 'row0.6'; Row = $true; Scale = 0.6 },
+    @{ Name = 'full0.75'; Row = $false; Scale = 0.75 },
+    @{ Name = 'row0.5'; Row = $true; Scale = 0.5 },
+    @{ Name = 'full1.25'; Row = $false; Scale = 1.25 },
+    @{ Name = 'full0.6'; Row = $false; Scale = 0.6 },
+    @{ Name = 'full1.5'; Row = $false; Scale = 1.5 },
+    @{ Name = 'row2'; Row = $true; Scale = 2.0 }
+)
+$script:rescueCache = @{}
+$script:rescueBitmap = $null
+$script:rescueTries = 0
+$MAX_RESCUE_LABELS = 6
+
+function ReadRegion([double]$x, [double]$y, [double]$w, [double]$h, [double]$scale, [int]$pad) {
+    # OCR one region of the picture drawn at another size on a white margin.
+    # Line boxes come back in the original picture's pixels.
+    $src = $script:rescueBitmap
+    $dw = [int][Math]::Max(1, [Math]::Round($w * $scale))
+    $dh = [int][Math]::Max(1, [Math]::Round($h * $scale))
+    $tmp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ('scrcpy-sms-ocr-row-{0}.png' -f $PID))
+    $out = New-Object System.Drawing.Bitmap ($dw + 2 * $pad), ($dh + 2 * $pad)
+    $g = [System.Drawing.Graphics]::FromImage($out)
+    try {
+        $g.Clear([System.Drawing.Color]::White)
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $dest = New-Object System.Drawing.Rectangle $pad, $pad, $dw, $dh
+        $g.DrawImage($src, $dest, [float]$x, [float]$y, [float]$w, [float]$h, [System.Drawing.GraphicsUnit]::Pixel)
+        $out.Save($tmp, [System.Drawing.Imaging.ImageFormat]::Png)
+    } finally {
+        $g.Dispose()
+        $out.Dispose()
+    }
+    $found = @()
+    try {
+        $result = RecognizePng $tmp
+        $script:rescueTries++
+        foreach ($line in $result.Lines) {
+            $top = [double]::MaxValue; $bottom = 0.0; $left = [double]::MaxValue; $tall = 0.0
+            foreach ($word in $line.Words) {
+                $box = $word.BoundingRect
+                if ($box.Y -lt $top) { $top = $box.Y }
+                if (($box.Y + $box.Height) -gt $bottom) { $bottom = $box.Y + $box.Height }
+                if ($box.X -lt $left) { $left = $box.X }
+                if ($box.Height -gt $tall) { $tall = $box.Height }
+            }
+            $found += @{
+                Text = [string]$line.Text
+                Mid = $y + ((($top + $bottom) / 2) - $pad) / $scale
+                Left = $x + ($left - $pad) / $scale
+                Tall = $tall / $scale
+            }
         }
-        hidden = @(HiddenPrefixes $lines)
-        labels = @(LabelCodePairs $lines)
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+    return $found
+}
+
+function RescueCode([string[]]$lines, [int]$index) {
+    $box = $script:lineRects[$index]
+    $labelTall = [double]$script:lineHeights[$index]
+    if (-not $box -or $labelTall -lt 6) { return '' }
+    if (-not $script:rescueBitmap) {
+        $script:rescueBitmap = [System.Drawing.Bitmap]::FromFile($script:rescueSource)
+    }
+    $imageW = $script:rescueBitmap.Width
+    $imageH = $script:rescueBitmap.Height
+    # The code sits just under its label, starting at about the same left edge.
+    $bandTop = $box.Bottom
+    $bandBottom = $box.Bottom + 4.5 * $labelTall
+    # Half a code the first pass did read must be part of the answer.
+    $halves = @()
+    for ($j = 0; $j -lt $lines.Count; $j++) {
+        if ($j -eq $index -or -not $script:lineRects[$j]) { continue }
+        $mid = ($script:lineRects[$j].Top + $script:lineRects[$j].Bottom) / 2
+        if ($mid -lt $bandTop -or $mid -gt $bandBottom) { continue }
+        if ($script:lineHeights[$j] -lt (1.5 * $labelTall)) { continue }
+        if ([string]$lines[$j] -match '^\s*(\d{3})\s*$') { $halves += $Matches[1] }
+    }
+    $votes = @{}
+    $read = 0
+    foreach ($variant in $script:rescueVariants) {
+        if ($variant.Row) {
+            $x = [Math]::Max(0, $box.Left - 1.2 * $labelTall)
+            $y = [Math]::Min($imageH - 1, $box.Bottom + 0.35 * $labelTall)
+            $w = [Math]::Min(21.4 * $labelTall, $imageW - $x)
+            $h = [Math]::Min(4.15 * $labelTall, $imageH - $y)
+            $found = @(ReadRegion $x $y $w $h $variant.Scale 24)
+        } else {
+            if (-not $script:rescueCache.ContainsKey($variant.Name)) {
+                $script:rescueCache[$variant.Name] = @(ReadRegion 0 0 $imageW $imageH $variant.Scale 0)
+            }
+            $found = @($script:rescueCache[$variant.Name])
+        }
+        $read++
+        foreach ($line in $found) {
+            $code = CodeShaped $line.Text
+            if (-not $code) { continue }
+            if ($line.Mid -lt $bandTop -or $line.Mid -gt $bandBottom) { continue }
+            if ($line.Tall -lt (1.5 * $labelTall)) { continue }
+            if ($line.Left -gt ($box.Left + 4 * $labelTall)) { continue }
+            $fits = ($halves.Count -eq 0)
+            foreach ($half in $halves) {
+                if ($code.StartsWith($half) -or $code.EndsWith($half)) { $fits = $true }
+            }
+            if (-not $fits) { continue }
+            $votes[$code] = 1 + [int]$votes[$code]
+            break
+        }
+        # Two different answers: one read is wrong and there is no telling which.
+        if ($votes.Count -gt 1) { return '' }
+        foreach ($code in @($votes.Keys)) {
+            if ($votes[$code] -ge 2) { return $code }
+        }
+        # Five reads with no code at all: the row is hidden or is not a code row.
+        if ($read -ge 5 -and $votes.Count -eq 0) { break }
+    }
+    return ''
+}
+
+function RescueMissingCodes([string[]]$lines, $pairs) {
+    # Labels that got no code in the first pass. Known account prefixes first.
+    $rescued = @()
+    if (-not $script:rescueSource -or $script:lineRects.Count -ne $lines.Count) { return $rescued }
+    $have = @{}
+    foreach ($pair in $pairs) { $have[[int]$pair.index] = $true }
+    $wanted = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($have.ContainsKey($i) -or (CodeShaped $lines[$i]) -or -not (IsAccountLabel $lines[$i])) { continue }
+        $wanted += $i
+    }
+    $wanted = @($wanted | Sort-Object { if (AccountPrefix (Normalize $lines[$_])) { 0 } else { 1 } }, { $_ } | Select-Object -First $MAX_RESCUE_LABELS)
+    try {
+        foreach ($i in $wanted) {
+            $code = ''
+            try { $code = RescueCode $lines $i } catch { $code = '' }
+            if ($code) {
+                $rescued += [ordered]@{ label = (Normalize $lines[$i]); code = [string]$code; index = $i }
+            }
+        }
+    } finally {
+        if ($script:rescueBitmap) {
+            $script:rescueBitmap.Dispose()
+            $script:rescueBitmap = $null
+        }
+    }
+    return $rescued
+}
+
+function AnalyzeText([string[]]$lines) {
+    $codes = [ordered]@{
+        cm = (ResolveHint $lines 'CM-jjilani')
+        cis = (ResolveHint $lines 'CIS-mmehmood')
+        cc = (ResolveHint $lines 'CC-tmalik')
+    }
+    $hidden = @(HiddenPrefixes $lines)
+    $pairs = @(LabelCodePairs $lines)
+    $totp = TotpCount $lines
+    $rescued = @(RescueMissingCodes $lines $pairs)
+    $rescuedNames = @()
+    foreach ($pair in $rescued) {
+        $pairs += $pair
+        $rescuedNames += [string]$pair.label
+        $totp++
+        $prefix = AccountPrefix ([string]$pair.label)
+        if ($prefix -and -not $codes[$prefix]) {
+            $codes[$prefix] = [string]$pair.code
+            $hidden = @($hidden | Where-Object { $_ -ne $prefix })
+        }
+    }
+    $payload = [ordered]@{
+        totp = $totp
+        codes = $codes
+        hidden = @($hidden)
+        labels = @($pairs)
+        rescued = @($rescuedNames)
+        reads = $script:rescueTries
         dump =if ($lines -and $lines.Count) { DumpLinesText $lines } else { 'EMPTY_OCR' }
     }
     return ($payload | ConvertTo-Json -Compress -Depth 4)
@@ -440,13 +622,33 @@ function LineHeights($ocrResult) {
         })
 }
 
+function LineRects($ocrResult) {
+    # Box around each OCR line (all of its words), in picture pixels.
+    return @($ocrResult.Lines | ForEach-Object {
+            $left = [double]::MaxValue; $top = [double]::MaxValue; $right = 0.0; $bottom = 0.0
+            foreach ($word in $_.Words) {
+                $box = $word.BoundingRect
+                if ($box.X -lt $left) { $left = $box.X }
+                if ($box.Y -lt $top) { $top = $box.Y }
+                if (($box.X + $box.Width) -gt $right) { $right = $box.X + $box.Width }
+                if (($box.Y + $box.Height) -gt $bottom) { $bottom = $box.Y + $box.Height }
+            }
+            [pscustomobject]@{ Left = $left; Top = $top; Right = $right; Bottom = $bottom }
+        })
+}
+
 $path = (Resolve-Path -LiteralPath $ImagePath).Path
 $lines = @()
 $script:lineHeights = @()
+$script:lineRects = @()
+# Picture the line boxes refer to; empty when the inverted copy was read instead.
+$script:rescueSource = ''
 try {
     $result = RecognizePng $path
     $lines = @($result.Lines | ForEach-Object { $_.Text })
     $script:lineHeights = @(LineHeights $result)
+    $script:lineRects = @(LineRects $result)
+    $script:rescueSource = $path
 } catch {
     $lines = @()
 }

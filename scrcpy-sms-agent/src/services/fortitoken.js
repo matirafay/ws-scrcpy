@@ -760,7 +760,7 @@ function rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis) {
 }
 
 function emptyOcrAnalysis() {
-    return { totp: 0, codes: { cm: null, cis: null, cc: null }, hidden: [], labels: null, dump: '' };
+    return { totp: 0, codes: { cm: null, cis: null, cc: null }, hidden: [], labels: null, rescued: [], dump: '' };
 }
 
 // Label -> code pairs from the -Analyze pass. null means the OCR script is an
@@ -826,6 +826,11 @@ function parseOcrAnalysis(raw) {
             },
             hidden,
             labels: parseOcrLabels(parsed.labels),
+            // Accounts whose code the first OCR pass dropped and a re-read of
+            // the row at other sizes recovered (two re-reads had to agree).
+            rescued: (Array.isArray(parsed.rescued) ? parsed.rescued : parsed.rescued ? [parsed.rescued] : [])
+                .map((item) => String(item || ''))
+                .filter(Boolean),
             dump: String(parsed.dump || '') || (text && start < 0 ? 'NON_JSON ' + text.slice(0, 120) : ''),
         };
     } catch (_err) {
@@ -1202,6 +1207,9 @@ async function collectFortiTokenCodes(options = {}) {
         log('FortiToken debug: OCR totp codes visible on screen=' + totpOnScreen);
         if (hiddenPrefixes.length) {
             log('FortiToken debug: dashed/hidden rows=' + hiddenPrefixes.join(','));
+        }
+        if (analysis.rescued && analysis.rescued.length) {
+            log('FortiToken debug: first OCR pass dropped digits; re-read the row for ' + analysis.rescued.join(','));
         }
         applyOcrAnalysis(pending, analysis, log, passName);
         await applyOcrLabels(pending, shot, log, passName, analysis);
