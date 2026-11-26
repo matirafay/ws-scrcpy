@@ -45,23 +45,89 @@ function mfaPayload(sms, options = {}) {
     };
 }
 
-async function postJson(url, apiKey, body) {
+// A post normally takes about a second (99% under 4.3s in the dev-PC test).
+// Without a limit a dead connection is only reported after 10s. With 5s, a
+// read that finished 2.5s into the window still gets a second try before 10s.
+const POST_ATTEMPT_MS = 5000;
+const POST_ATTEMPTS = 3;
+const POST_RETRY_PAUSE_MS = 300;
+const POST_MIN_ATTEMPT_MS = 1500;
+
+function networkReason(err) {
+    const cause = err && err.cause;
+    const detail = cause && (cause.code || cause.name || cause.message);
+    const message = String((err && err.message) || err || 'unknown');
+    return detail && !message.includes(String(detail)) ? message + ' (' + detail + ')' : message;
+}
+
+async function postOnce(url, apiKey, body, timeoutMs) {
     const headers = {
         Accept: 'application/json',
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
     };
-    const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        redirect: 'manual',
-    });
-    const text = await response.text();
-    if (response.status < 200 || response.status >= 300) {
-        throw new Error('POST ' + url + ' -> HTTP ' + response.status + (text ? ': ' + text.slice(0, 240) : ''));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            redirect: 'manual',
+            signal: controller.signal,
+        });
+        const text = await response.text();
+        return { status: response.status, text };
+    } catch (err) {
+        if (controller.signal.aborted) {
+            const timeout = new Error('no answer from the endpoint within ' + Math.round(timeoutMs / 100) / 10 + 's');
+            timeout.network = true;
+            throw timeout;
+        }
+        const failed = new Error(networkReason(err));
+        failed.network = true;
+        throw failed;
+    } finally {
+        clearTimeout(timer);
     }
-    return { status: response.status, body: text.slice(0, 500) };
+}
+
+// Sends the code, trying again at once when the network does not answer. An
+// HTTP error from the endpoint is not retried here: it is an answer.
+// options.deadline (ms since epoch) is when the code stops being worth sending.
+async function postJson(url, apiKey, body, options = {}) {
+    const log = typeof options.log === 'function' ? options.log : () => {};
+    const deadline = Number(options.deadline) || 0;
+    let lastError = null;
+    for (let attempt = 1; attempt <= POST_ATTEMPTS; attempt += 1) {
+        let timeoutMs = POST_ATTEMPT_MS;
+        if (deadline) {
+            const room = deadline - Date.now();
+            if (attempt > 1 && room < POST_MIN_ATTEMPT_MS) {
+                break;
+            }
+            timeoutMs = Math.max(POST_MIN_ATTEMPT_MS, Math.min(POST_ATTEMPT_MS, room));
+        }
+        try {
+            const reply = await postOnce(url, apiKey, body, timeoutMs);
+            if (reply.status < 200 || reply.status >= 300) {
+                throw new Error(
+                    'POST ' + url + ' -> HTTP ' + reply.status + (reply.text ? ': ' + reply.text.slice(0, 240) : ''),
+                );
+            }
+            return { status: reply.status, body: reply.text.slice(0, 500), attempts: attempt };
+        } catch (err) {
+            if (!err || !err.network) {
+                throw err;
+            }
+            lastError = err;
+            log('Post attempt ' + attempt + ' of ' + POST_ATTEMPTS + ' failed: ' + err.message + '.');
+            if (attempt < POST_ATTEMPTS) {
+                await new Promise((resolve) => setTimeout(resolve, POST_RETRY_PAUSE_MS));
+            }
+        }
+    }
+    throw new Error('Could not reach the endpoint: ' + ((lastError && lastError.message) || 'unknown'));
 }
 
 async function pushSms(sms, options = {}) {
@@ -87,9 +153,10 @@ async function pushSms(sms, options = {}) {
     if (!payload.automationShortCode) {
         throw new Error('Set automationShortCode.');
     }
-    const posted = await postJson(url, apiKey, payload);
+    const posted = await postJson(url, apiKey, payload, { log: options.log, deadline: options.deadline });
     return {
         ok: true,
+        attempts: posted.attempts,
         inbox: { url, status: posted.status, body: posted.body },
         payload: { title: payload.title, type: payload.type, smsCode: payload.smsCode, automationShortCode: payload.automationShortCode },
     };

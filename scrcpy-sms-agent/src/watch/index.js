@@ -96,9 +96,13 @@ async function pushNewCode(sms, state, log, target) {
     if (!enough) {
         return false;
     }
+    // Stop trying once fewer than MIN_SECONDS_TO_SEND seconds of the window are left.
+    const windowEndsAt = (windowId + 1) * 30000;
     const result = await pushSms(sms, {
         title: target.title,
         automationShortCode: target.automationShortCode,
+        log,
+        deadline: windowEndsAt - MIN_SECONDS_TO_SEND * 1000,
     });
     state.lastSent[key] = sms.code;
     state.lastSentWindow[key] = windowId;
@@ -112,8 +116,10 @@ async function pushNewCode(sms, state, log, target) {
         'Posted "' +
             target.title +
             '" with ' +
-            left +
-            's left (HTTP ' +
+            totpRemainingSeconds() +
+            's left' +
+            (result.attempts > 1 ? ' on attempt ' + result.attempts : '') +
+            ' (HTTP ' +
             result.inbox.status +
             ' type=' +
             (result.payload && result.payload.type) +
@@ -407,6 +413,13 @@ function startWatch(options = {}) {
                 pendingRetry = false;
                 delayMs = Math.max(400, (leftNow - 18) * 1000);
                 log('Keeping codes visible 18s before the next window (' + leftNow + 's).');
+            } else if (leftNow >= 11) {
+                // A late post must not cost the mid-window pass: without its tap
+                // FortiToken hides the codes before the next read.
+                pendingReveal = true;
+                pendingRetry = false;
+                delayMs = 400;
+                log('Keeping codes visible now (' + leftNow + 's left in this window).');
             } else {
                 delayMs = msUntilNextWindow();
                 log('Next read at the start of the next 30s window (' + leftNow + 's).');
