@@ -274,7 +274,10 @@ function startWatch(options = {}) {
             log('Retrying this window: ' + left + 's left. Reading and posting now.');
         } else if (pendingReveal || left < MIN_SECONDS_TO_SEND) {
             pendingReveal = false;
-            if (left >= 16) {
+            // The pass needs about 4s (6s the first time, when it looks up the row
+            // positions), so 10s is enough to finish before the next window. A
+            // skipped pass lets FortiToken's 60s hide timer run out.
+            if (left >= 10) {
                 log('Keeping codes visible before the next read (' + left + 's left).');
                 try {
                     await keepCodesVisible({ accounts, log });

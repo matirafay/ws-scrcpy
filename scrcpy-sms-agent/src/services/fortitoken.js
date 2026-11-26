@@ -17,6 +17,9 @@ let cachedSearch = null;
 let cachedSearchBottom = 0;
 let cachedActionBarBottom = 0;
 let cachedEyesByPrefix = Object.create(null);
+let cachedEyesByName = Object.create(null);
+// True once a UI dump has shown where the rows really are on this phone.
+let eyesSeenInDump = false;
 const DEFAULT_DASH_BY_PREFIX = {
     cm: { x: 242, y: 399 },
     cis: { x: 242, y: 562 },
@@ -36,8 +39,10 @@ async function waitForFreshWindow(minLeft = PREFERRED_LEFT_TO_READ, period = TOT
     if (left >= minLeft) {
         return left;
     }
-    await sleep(left * 1000 + 400);
-    await sleep(300);
+    // Wake 0.7s into the next window. Counting in whole seconds used to add up
+    // to a second of extra delay before the read.
+    const periodMs = period * 1000;
+    await sleep(periodMs - (Date.now() % periodMs) + 700);
     return totpRemainingSeconds(period);
 }
 
@@ -637,21 +642,57 @@ function hintPrefix(hint) {
     return '';
 }
 
+function eyeNameKey(name) {
+    return String(name || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '');
+}
+
 function rememberEyesFromAccounts(accounts) {
     (accounts || []).forEach((item) => {
-        const prefix = hintPrefix(item && item.from);
-        if (prefix && item.eye) {
+        if (!item || !item.eye) {
+            return;
+        }
+        eyesSeenInDump = true;
+        const prefix = hintPrefix(item.from);
+        if (prefix) {
             cachedEyesByPrefix[prefix] = item.eye;
+        }
+        // Accounts without a CM/CIS/CC prefix are remembered by name, so their
+        // row can be tapped again without a 2-3s UI dump.
+        const name = eyeNameKey(item.from);
+        if (name.length >= 4) {
+            cachedEyesByName[name] = item.eye;
         }
     });
 }
 
-function cachedEyeFor(hint, from) {
-    const prefix = hintPrefix(hint) || hintPrefix(from);
-    if (!prefix) {
+function cachedEyeByName(name) {
+    const want = eyeNameKey(name);
+    if (want.length < 4) {
         return null;
     }
-    return cachedEyesByPrefix[prefix] || DEFAULT_DASH_BY_PREFIX[prefix] || null;
+    if (cachedEyesByName[want]) {
+        return cachedEyesByName[want];
+    }
+    // "test-dummy" in the config is shown as "Dummy:test-dummy" on the phone.
+    const close = Object.keys(cachedEyesByName).filter(
+        (key) => want.length >= 6 && key.length >= 6 && (key.includes(want) || want.includes(key)),
+    );
+    return close.length === 1 ? cachedEyesByName[close[0]] : null;
+}
+
+function cachedEyeFor(hint, from) {
+    const prefix = hintPrefix(hint) || hintPrefix(from);
+    if (prefix && cachedEyesByPrefix[prefix]) {
+        return cachedEyesByPrefix[prefix];
+    }
+    return (
+        cachedEyeByName(from) ||
+        cachedEyeByName(hint) ||
+        (prefix ? DEFAULT_DASH_BY_PREFIX[prefix] : null) ||
+        null
+    );
 }
 
 function syntheticAccountMatch(names) {
@@ -1240,10 +1281,55 @@ async function collectFortiTokenCodes(options = {}) {
         }
     }
 
-    const eyesTapped = new Set();
+    // Row key -> the spot that was tapped. A row is tapped once per spot, so a
+    // UI dump that finds the row somewhere else may tap it again.
+    const eyesTapped = new Map();
 
     function eyeKey(item) {
         return hintPrefix(item.hint) || hintPrefix(item.match && item.match.from) || item.hint;
+    }
+
+    function eyeSpot(item) {
+        const eye = item && item.match && item.match.eye;
+        return eye ? eye.x + ',' + eye.y : '';
+    }
+
+    // FortiToken hides a code 60s after the last tap on its row, and a tap on a
+    // code that is showing restarts that timer. Tapping every row in the quiet
+    // middle of each window keeps the codes on screen, so the read at the start
+    // of the next window never has to open a hidden row first.
+    async function refreshVisibleCodes() {
+        if (!eyesSeenInDump || pending.some((item) => !item.match.eye)) {
+            log('FortiToken debug: dump UI once for the row coordinates of the refresh tap');
+            try {
+                const visible = await dumpAccounts(device.serial);
+                logDumpRows(visible);
+                attachDumpToPending(pending, visible);
+            } catch (err) {
+                log(
+                    'FortiToken debug: UI dump for refresh tap FAILED: ' +
+                        String((err && err.message) || err || 'unknown'),
+                );
+            }
+        }
+        // Never tap built-in guesses here: only spots a UI dump has confirmed.
+        const toTap = eyesSeenInDump ? pending.filter((item) => item.match.eye) : [];
+        if (!toTap.length) {
+            return false;
+        }
+        for (const item of toTap) {
+            log(
+                'FortiToken debug: refresh tap for "' +
+                    item.match.from +
+                    '" at ' +
+                    eyeSpot(item) +
+                    ' (restarts the 60s hide timer)',
+            );
+            await shellQuiet(device.serial, 'input tap ' + item.match.eye.x + ' ' + item.match.eye.y);
+            await sleep(120);
+        }
+        await sleep(280);
+        return true;
     }
 
     async function tapHiddenEyes(reason, retried) {
@@ -1252,7 +1338,7 @@ async function collectFortiTokenCodes(options = {}) {
                 return false;
             }
             const key = eyeKey(item);
-            return key ? !eyesTapped.has(key) : true;
+            return key ? eyesTapped.get(key) !== eyeSpot(item) : true;
         });
         if (!toTap.length) {
             const want = pending.filter((item) => rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis));
@@ -1296,7 +1382,7 @@ async function collectFortiTokenCodes(options = {}) {
                 'input tap ' + item.match.eye.x + ' ' + item.match.eye.y,
             );
             if (key) {
-                eyesTapped.add(key);
+                eyesTapped.set(key, eyeSpot(item));
             }
             await sleep(120);
         }
@@ -1316,7 +1402,23 @@ async function collectFortiTokenCodes(options = {}) {
 
     if (pending.every((item) => item.match.code)) {
         log('FortiToken debug: all accounts OCR ok -> skip dump and eye taps');
-    } else {
+        if (options.revealOnly && (await refreshVisibleCodes())) {
+            // Look again: if a tap landed badly and a row is hidden now, the
+            // steps below open it while there is still time before the window ends.
+            pending.forEach((item) => {
+                item.match.code = null;
+            });
+            try {
+                await captureAndOcr('refresh');
+            } catch (err) {
+                log(
+                    'FortiToken debug: recapture after refresh tap FAILED: ' +
+                        String((err && err.message) || err || 'unknown'),
+                );
+            }
+        }
+    }
+    if (!pending.every((item) => item.match.code)) {
         const needsOpen = pending.some((item) => rowNeedsEye(item, totpOnScreen, hiddenPrefixes, analysis));
         if (needsOpen) {
             await tapHiddenEyes(totpOnScreen === 0 ? 'OCR no digits on token list' : 'OCR dashed');
@@ -1448,7 +1550,7 @@ async function collectFortiTokenCodes(options = {}) {
             if (captured) {
                 match = captured;
                 if (allowEye && tapKey) {
-                    eyesTapped.add(tapKey);
+                    eyesTapped.set(tapKey, eyeSpot(item));
                 }
             }
         }
